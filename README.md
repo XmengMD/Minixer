@@ -19,10 +19,11 @@ Minixer 常驻于系统后台，可将硬件麦克风输入经 VST3 插件链（
 
 - JUCE 8
 - C++17
+- CMake
 - Visual Studio 2022
 - Windows 10 / 11
 
-## 构建步骤
+## 构建步骤（CMake）
 
 ### 1. 准备 JUCE
 
@@ -30,22 +31,39 @@ Minixer 常驻于系统后台，可将硬件麦克风输入经 VST3 插件链（
 
 > 本项目不包含 JUCE 源码，请自行准备。
 
-### 2. 配置模块路径
+### 2. 配置 JUCE 路径
 
-使用 Projucer 打开根目录下的 `Minixer.jucer`，在 **Modules** 中设置各模块路径为你的 JUCE `modules` 目录（例如项目根目录下的 `..\..\JUCE\modules`）。
+以下任一方式均可：
 
-### 3. 导出工程
+- 设置环境变量：`JUCE_DIR=<JUCE 根目录>`
+- 配置时传入：`-D JUCE_DIR=<JUCE 根目录>`
+- 将 JUCE 放在项目根目录附近的常见位置，如 `../JUCE`、`../../JUCE`
 
-在 Projucer 中选择 **File → Save Project and Open in IDE**，导出 Visual Studio 2022 工程到 `Builds/VisualStudio2022/`。
+### 3. 生成并编译
 
-### 4. 编译运行
+```powershell
+# x64（主程序 + 64 位 PluginHost）
+cmake -B build -S . -A x64 -T host=x64
+cmake --build build --config Debug
 
-在 Visual Studio 2022 中：
+# 32 位 PluginHost（用于加载 32-bit VST3 插件）
+cmake -B build-x86 -S . -A Win32 -T host=x64
+cmake --build build-x86 --target PluginHost --config Debug
+```
 
-1. 编译 `PluginHost_App` 项目，生成 `PluginHost64.exe` 与 `PluginHost32.exe`。
-2. 编译并运行 `Minixer_App` 项目。
+构建完成后：
 
-> `PluginHost` 子进程需与主程序输出目录保持一致，否则插件沙盒无法正常工作。
+- `build/Minixer_artefacts/Debug/Minixer.exe`
+- `build/Minixer_artefacts/Debug/PluginHost64.exe`
+- `build-x86/PluginHost_artefacts/Debug/PluginHost32.exe`
+
+CMake 构建脚本会在 PluginHost 编译完成后自动将其复制到 Minixer 输出目录。
+
+### 4. 运行
+
+确保 `PluginHost64.exe` 与 `PluginHost32.exe` 与 `Minixer.exe` 位于同一目录，然后运行 `Minixer.exe`。
+
+> 如需继续使用 Projucer，保留的 `Minixer.jucer` 仍可打开和导出，但 CMake 是推荐的本地开发方式。
 
 ## 目录结构
 
@@ -62,14 +80,15 @@ Minixer/
 ├── assets/                 # 图标资源
 ├── Builds/                 # 导出的 IDE 工程（编译产物已忽略）
 ├── docs/                   # 设计文档
-├── Minixer.jucer           # JUCE 工程文件
+├── Minixer.jucer           # JUCE 工程文件（Projucer）
+├── CMakeLists.txt          # CMake 构建配置
 └── README.md
 ```
 
 ## 注意事项
 
 - 本项目**不包含 ASIO SDK**，默认使用 WASAPI / DirectSound 音频驱动。如需 ASIO 支持，请自行下载 Steinberg ASIO SDK 并配置项目。
-- 项目导出的 Visual Studio 工程中的 JUCE 路径可能为本机绝对路径，上传或换机编译前请重新在 Projucer 中配置模块路径。
+- 推荐使用 CMake 构建。Projucer 工作流仍可通过 `Minixer.jucer` 使用，但其导出的 Visual Studio 工程可能包含本机绝对路径，换机或上传前需重新配置Minixer.jucer中的JUCE模块包含路径。
 - 项目仅支持 VST3 插件，不支持 VST2 / AAX。
 - 运行时需要 `PluginHost64.exe` 与 `PluginHost32.exe` 与主程序位于同一目录，用于加载 64-bit / 32-bit 插件的沙盒子进程。
 
@@ -102,10 +121,11 @@ Minixer runs in the background, taking hardware microphone input through a VST3 
 
 - JUCE 8
 - C++17
+- CMake
 - Visual Studio 2022
 - Windows 10 / 11
 
-## Build Instructions
+## Build Instructions (CMake)
 
 ### 1. Prepare JUCE
 
@@ -113,22 +133,39 @@ Download and install [JUCE 8](https://juce.com/) to any location on your machine
 
 > This project does not include the JUCE source code. Please prepare it separately.
 
-### 2. Configure module paths
+### 2. Configure the JUCE path
 
-Open `Minixer.jucer` in the Projucer and set each module path to your local JUCE `modules` directory (e.g. `..\..\JUCE\modules` relative to the project root).
+Use any of the following methods:
 
-### 3. Export the project
+- Set environment variable: `JUCE_DIR=<JUCE root directory>`
+- Pass during configuration: `-D JUCE_DIR=<JUCE root directory>`
+- Place JUCE in a common location near the project root, such as `../JUCE` or `../../JUCE`
 
-In the Projucer, choose **File → Save Project and Open in IDE** to export the Visual Studio 2022 project to `Builds/VisualStudio2022/`.
+### 3. Generate and build
 
-### 4. Build and run
+```powershell
+# x64 (main app + 64-bit PluginHost)
+cmake -B build -S . -A x64 -T host=x64
+cmake --build build --config Debug
 
-In Visual Studio 2022:
+# 32-bit PluginHost (For loading 32-bit VST3 plugins)
+cmake -B build-x86 -S . -A Win32 -T host=x64
+cmake --build build-x86 --target PluginHost --config Debug
+```
 
-1. Build the `PluginHost_App` project to produce `PluginHost64.exe` and `PluginHost32.exe`.
-2. Build and run the `Minixer_App` project.
+After building:
 
-> The `PluginHost` executables must reside in the same output directory as the main application, otherwise the plugin sandbox will not work.
+- `build/Minixer_artefacts/Debug/Minixer.exe`
+- `build/Minixer_artefacts/Debug/PluginHost64.exe`
+- `build-x86/PluginHost_artefacts/Debug/PluginHost32.exe`
+
+The CMake build script automatically copies PluginHost to the Minixer output directory after compilation.
+
+### 4. Run
+
+Make sure `PluginHost64.exe` and `PluginHost32.exe` are in the same directory as `Minixer.exe`, then run `Minixer.exe`.
+
+> To continue using the Projucer workflow, the retained `Minixer.jucer` can still be opened and exported, but CMake is the recommended local development approach.
 
 ## Directory Structure
 
@@ -145,14 +182,15 @@ Minixer/
 ├── assets/                 # Icon resources
 ├── Builds/                 # Exported IDE projects (build artifacts ignored)
 ├── docs/                   # Design documents
-├── Minixer.jucer           # JUCE project file
+├── Minixer.jucer           # JUCE project file (Projucer)
+├── CMakeLists.txt          # CMake build configuration
 └── README.md
 ```
 
 ## Notes
 
 - This project **does not include the ASIO SDK** and uses WASAPI / DirectSound by default. Add the Steinberg ASIO SDK manually if ASIO support is required.
-- The exported Visual Studio project may contain machine-specific absolute paths to JUCE. Reconfigure the module paths in Projucer before building on another machine or uploading to version control.
+- CMake is the recommended build system. The Projucer workflow is still available via `Minixer.jucer`, but may contain machine-specific absolute JUCE module include paths that need to be reconfigured before use on another machine.
 - Only VST3 plugins are supported; VST2 / AAX are not supported.
 - At runtime, `PluginHost64.exe` and `PluginHost32.exe` must be in the same directory as the main executable, as they are used to sandbox 64-bit and 32-bit plugins.
 
