@@ -4,6 +4,7 @@
 #include "../Settings/AppSettings.h"
 #include "../Plugin/PluginManagerComponent.h"
 #include "ShortcutsSettingsComponent.h"
+#include "AboutComponent.h"
 
 namespace minixer
 {
@@ -46,6 +47,10 @@ public:
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
 
     //==============================================================================
+    /** 将键盘焦点移到设置面板内的第一个可聚焦控件。 */
+    void grabInitialFocus();
+
+    //==============================================================================
     /** 设置当前选中的自动加载 preset 文件。 */
     void setAutoLoadPresetFile (const juce::File& presetFile);
 
@@ -60,6 +65,8 @@ private:
     void refreshDeviceLists();
     void refreshSampleRatesAndBufferSizes();
     void applyAudioSetup();
+    void applyAsioDeviceSelection();
+    void openAsioControlPanel();
     void updateUIFromSetup();
     void updateAutoLoadPresetEnabledState();
     void launchAutoLoadPresetFileChooser();
@@ -68,6 +75,7 @@ private:
     void notifyShortcutsChanged();
     void showPluginManagerWindow();
     void showShortcutsSettingsWindow();
+    void showAboutWindow();
     void refreshPluginCount();
 
     //==============================================================================
@@ -92,12 +100,16 @@ private:
 
     juce::Label outputDeviceLabel;
     juce::ComboBox outputDeviceComboBox;
+    juce::TextButton asioControlPanelButton { TRANS("Open ASIO Control Panel") };
 
     juce::Label sampleRateLabel;
     juce::ComboBox sampleRateComboBox;
 
     juce::Label bufferSizeLabel;
     juce::ComboBox bufferSizeComboBox;
+
+    //==============================================================================
+    bool isAsioMode() const;
 
     // 应用偏好
     juce::Label preferencesSectionLabel;
@@ -114,9 +126,13 @@ private:
     juce::TextButton managePluginsButton { TRANS("Manage Plugins") };
     juce::Label pluginCountLabel;
 
-    // 快捷键设置
+    // 快捷键设置区
     juce::Label shortcutsSectionLabel;
     juce::TextButton configureShortcutsButton { TRANS("Configure Shortcuts...") };
+
+    // 关于
+    juce::Label aboutSectionLabel;
+    juce::TextButton aboutButton { TRANS("About Minixer") };
 
     juce::StringArray allDeviceNames;
     juce::Array<bool> deviceIsInput;
@@ -126,6 +142,7 @@ private:
 
     std::unique_ptr<juce::DocumentWindow> pluginManagerWindow;
     std::unique_ptr<juce::DocumentWindow> shortcutsSettingsWindow;
+    std::unique_ptr<juce::DocumentWindow> aboutWindow;
 
     juce::ListenerList<Listener> listeners;
 

@@ -799,7 +799,14 @@ bool MainComponent::ensureStereoChannelsIfAvailable()
 //==============================================================================
 void MainComponent::toggleSettings()
 {
-    settingsPanel.setVisible (! settingsPanel.isVisible());
+    const bool nowVisible = ! settingsPanel.isVisible();
+    settingsPanel.setVisible (nowVisible);
+
+    if (nowVisible)
+        settingsPanel.grabInitialFocus();
+    else
+        grabKeyboardFocus();
+
     resized();
 }
 
@@ -1471,6 +1478,12 @@ void MainComponent::pluginEditorWindowClosed (PluginEditorWindow* window)
             return w.get() == window;
         }),
         pluginEditorWindows.end());
+
+    // 插件编辑器关闭后，把焦点还回主窗口，确保键盘快捷键继续响应。
+    if (auto* mainWindow = findParentComponentOfClass<juce::DocumentWindow>())
+        mainWindow->toFront (true);
+
+    grabKeyboardFocus();
 }
 
 //==============================================================================

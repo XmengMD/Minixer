@@ -29,7 +29,7 @@ PluginManagerComponent::PluginManagerComponent()
     // 的 JUCE_ASSERT_MESSAGE_THREAD）必须在消息线程执行。将扫描线程数设为 0，
     // PluginListComponent 会改为在消息线程上通过 Timer 轮询同步扫描；进度对话
     // 框仍会正常显示，并在每个插件扫描间隙刷新进度。
-    pluginListComponent.setScanDialogText (TRANS ("Scanning for VST3 plugins…"),
+    pluginListComponent.setScanDialogText (TRANS ("Scanning for VST3 plugins"),
                                            TRANS ("Please wait while the plugins are scanned."));
     pluginListComponent.setNumberOfThreadsForScanning (0);
 
@@ -40,8 +40,17 @@ PluginManagerComponent::PluginManagerComponent()
 
     addAndMakeVisible (pluginListComponent);
 
+    scanStatusLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
+    scanStatusLabel.setColour (juce::Label::textColourId, MixerLookAndFeel::getTextColour());
+    scanStatusLabel.setJustificationType (juce::Justification::centredLeft);
+    scanStatusLabel.setText (TRANS ("Ready"), juce::dontSendNotification);
+    addAndMakeVisible (scanStatusLabel);
+
     // 监听 KnownPluginList 变化，在扫描结束后展示扫描报告。
     PluginRegistry::getInstance().getKnownPluginList().addChangeListener (this);
+
+    // 启动状态轮询定时器，用于在扫描期间更新 scanStatusLabel。
+    startTimer (scanStatusTimerMs);
 
     setSize (600, 500);
 }
@@ -68,9 +77,15 @@ void PluginManagerComponent::resized()
     auto bounds = getLocalBounds().reduced (8);
 
     auto buttonHeight = 28;
-    rescanFailedPluginsButton.setBounds (bounds.removeFromTop (buttonHeight));
+    auto statusHeight = 22;
 
-    pluginListComponent.setBounds (bounds.withTrimmedTop (8));
+    rescanFailedPluginsButton.setBounds (bounds.removeFromTop (buttonHeight));
+    bounds.removeFromTop (8);
+
+    scanStatusLabel.setBounds (bounds.removeFromBottom (statusHeight));
+    bounds.removeFromBottom (4);
+
+    pluginListComponent.setBounds (bounds);
 }
 
 //==============================================================================
@@ -79,32 +94,61 @@ void PluginManagerComponent::changeListenerCallback (juce::ChangeBroadcaster* so
     if (source != &PluginRegistry::getInstance().getKnownPluginList())
         return;
 
-    // 每次列表变化都重新启动防抖定时器，扫描真正结束后再展示报告。
-    startTimer (scanReportDelayMs);
+    // 每次列表变化都重置防抖计数器，扫描真正结束后再展示报告。
+    scanReportDelayCounter = 5;
 }
 
 //==============================================================================
 void PluginManagerComponent::timerCallback()
 {
-    stopTimer();
-
     auto& registry = PluginRegistry::getInstance();
 
-    // 让 PluginRegistry 检测扫描是否已空闲，若已空闲则结束本次报告。
-    registry.checkAndFinishIdleScan();
-
-    // 扫描仍在进行中则继续等待。
-    if (registry.isScanInProgress())
+    // 更新扫描状态标签：PluginListComponent 已创建 Scanner 但 PluginRegistry
+    // 尚未开始记录单个文件时，说明正处于 JUCE 的目录枚举阶段。
+    if (pluginListComponent.isScanning())
     {
-        startTimer (scanReportDelayMs);
-        return;
+        if (registry.isScanInProgress())
+        {
+            auto currentFile = registry.getCurrentScanningFile();
+
+            if (currentFile.isNotEmpty())
+            {
+                scanStatusLabel.setText (TRANS ("Scanning: ") + juce::File (currentFile).getFileName(),
+                                         juce::dontSendNotification);
+            }
+            else
+            {
+                scanStatusLabel.setText (TRANS ("Scanning plugins"),
+                                         juce::dontSendNotification);
+            }
+        }
+        else
+        {
+            scanStatusLabel.setText (TRANS ("Enumerating plugin directories"),
+                                     juce::dontSendNotification);
+        }
+    }
+    else
+    {
+        scanStatusLabel.setText (TRANS ("Ready"), juce::dontSendNotification);
     }
 
-    // 扫描已真正结束，且存在未展示的报告时，弹出最终报告并清理一次性状态。
-    if (registry.getLastScanReport().hasUnshownReport)
+    // 扫描报告防抖：每次 KnownPluginList 变化时计数器重置为 5（约 500ms）。
+    // 计数器归零且扫描真正空闲时，弹出扫描报告。
+    if (scanReportDelayCounter > 0)
     {
-        rescanFailedPluginsButton.setToggleState (false, juce::dontSendNotification);
-        showScanReportIfNeeded();
+        --scanReportDelayCounter;
+
+        if (scanReportDelayCounter == 0)
+        {
+            registry.checkAndFinishIdleScan();
+
+            if (! registry.isScanInProgress() && registry.getLastScanReport().hasUnshownReport)
+            {
+                rescanFailedPluginsButton.setToggleState (false, juce::dontSendNotification);
+                showScanReportIfNeeded();
+            }
+        }
     }
 }
 
@@ -137,7 +181,7 @@ juce::String PluginManagerComponent::formatScanReport (const PluginScanReport& r
 
         if (report.failedEntries.size() > maxFailedEntriesToShow)
         {
-            text << "  " << TRANS ("…and") << " "
+            text << "  " << TRANS ("and") << " "
                  << (report.failedEntries.size() - maxFailedEntriesToShow)
                  << " " << TRANS ("more") << "\n";
         }

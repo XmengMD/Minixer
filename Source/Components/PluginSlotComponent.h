@@ -71,7 +71,7 @@ private:
     交互：
     - 左键点击槽位：打开插件编辑器（有插件）或加载插件（空槽）
     - 右键菜单：Load / Replace / Bypass / Delete / Copy / Paste
-    - 键盘 Delete：删除当前槽位（需获取焦点）
+    - 全局快捷键 deleteFocusedSlot：删除当前焦点槽位
 */
 class PluginSlotComponent  : public juce::Component,
                              public juce::Button::Listener
@@ -124,7 +124,7 @@ public:
     void mouseDrag (const juce::MouseEvent& event) override;
     void mouseUp (const juce::MouseEvent& event) override;
     void mouseDoubleClick (const juce::MouseEvent& event) override;
-    bool keyPressed (const juce::KeyPress& key) override;
+    void focusOfChildComponentChanged (FocusChangeType cause) override;
 
 private:
     //==============================================================================
