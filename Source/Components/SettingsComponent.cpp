@@ -105,6 +105,12 @@ SettingsComponent::~SettingsComponent()
 }
 
 //==============================================================================
+void SettingsComponent::grabInitialFocus()
+{
+    driverComboBox.grabKeyboardFocus();
+}
+
+//==============================================================================
 void SettingsComponent::resized()
 {
     auto bounds = getLocalBounds().reduced (16, 16);

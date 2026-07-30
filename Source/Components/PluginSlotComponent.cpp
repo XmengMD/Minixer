@@ -111,6 +111,9 @@ void PluginSlotComponent::resized()
 //==============================================================================
 void PluginSlotComponent::buttonClicked (juce::Button* button)
 {
+    // 点击子按钮时把焦点归到槽位，保证键盘导航和“当前焦点槽位”判断一致。
+    grabKeyboardFocus();
+
     if (button == &bypassButton)
     {
         if (pluginName.isNotEmpty())
@@ -177,15 +180,10 @@ void PluginSlotComponent::mouseDoubleClick (const juce::MouseEvent& event)
 }
 
 //==============================================================================
-bool PluginSlotComponent::keyPressed (const juce::KeyPress& key)
+void PluginSlotComponent::focusOfChildComponentChanged (FocusChangeType /*cause*/)
 {
-    if (key == juce::KeyPress (juce::KeyPress::deleteKey) && pluginName.isNotEmpty())
-    {
-        listeners.call ([this] (Listener& l) { l.pluginSlotDeleteRequested (slotIndex); });
-        return true;
-    }
-
-    return false;
+    // 子按钮获得/失去焦点时，槽位的高亮外框状态可能改变，需要重绘。
+    repaint();
 }
 
 //==============================================================================

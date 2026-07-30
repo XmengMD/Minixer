@@ -1,4 +1,4 @@
-﻿#include "LevelMeterComponent.h"
+#include "LevelMeterComponent.h"
 
 namespace minixer
 {
@@ -72,15 +72,20 @@ void LevelMeterComponent::paint (juce::Graphics& g)
                                         juce::jmax (22.0f, maxLabelWidth + tickLength + 4.0f));
     auto meterBounds = bounds.withTrimmedRight (scaleWidth);
 
-    const auto barWidth = (meterBounds.getWidth() - meterGap) * 0.5f;
-    auto leftBounds  = meterBounds.withWidth (barWidth);
-    auto rightBounds = meterBounds.withLeft (meterBounds.getRight() - barWidth);
+    // 为顶部 +6 与底部 -60 的刻度标签留出垂直空间，避免文字被边界裁切。
+    // 刻度与电平条使用同一份内缩后的区域，保证三者对齐。
+    constexpr auto scaleLabelHeight = 10.0f;
+    auto meterDisplayBounds = meterBounds.reduced (0.0f, scaleLabelHeight * 0.5f);
+
+    const auto barWidth = (meterDisplayBounds.getWidth() - meterGap) * 0.5f;
+    auto leftBounds  = meterDisplayBounds.withWidth (barWidth);
+    auto rightBounds = meterDisplayBounds.withLeft (meterDisplayBounds.getRight() - barWidth);
 
     MixerLookAndFeel::drawMeterBar (g, leftBounds,  displayedLevelDb[0], peakDb[0], isClipping[0], maxDb);
     MixerLookAndFeel::drawMeterBar (g, rightBounds, displayedLevelDb[1], peakDb[1], isClipping[1], maxDb);
 
     // 标准刻度
-    drawScale (g, bounds.removeFromRight (scaleWidth), meterBounds);
+    drawScale (g, bounds.removeFromRight (scaleWidth), meterDisplayBounds);
 
     // 过载标签：任一通道削波即显示
     if (isClipping[0] || isClipping[1])
@@ -260,7 +265,8 @@ void LevelMeterComponent::drawScale (juce::Graphics& g, const juce::Rectangle<fl
         else
             label = juce::String (db, 0);
 
-        auto labelTop = juce::jlimit (0.0f, meterBounds.getHeight() - 10.0f, y - 5.0f);
+        // 标签垂直居中于刻度线，但限制在刻度区域（scaleBounds）内，防止最底端 -60 被夹到 -54 位置。
+        auto labelTop = juce::jlimit (scaleBounds.getY(), scaleBounds.getBottom() - 10.0f, y - 5.0f);
         // 使用 Rectangle<float> 版本的 drawText 避免类型转换警告
         g.drawText (label, juce::Rectangle<float> (textX, labelTop, textWidth, 10.0f),
                     juce::Justification::centredLeft, false);

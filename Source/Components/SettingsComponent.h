@@ -47,6 +47,10 @@ public:
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
 
     //==============================================================================
+    /** 将键盘焦点移到设置面板内的第一个可聚焦控件。 */
+    void grabInitialFocus();
+
+    //==============================================================================
     /** 设置当前选中的自动加载 preset 文件。 */
     void setAutoLoadPresetFile (const juce::File& presetFile);
 
