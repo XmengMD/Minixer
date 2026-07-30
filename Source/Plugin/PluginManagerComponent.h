@@ -54,9 +54,13 @@ private:
     //==============================================================================
     juce::ToggleButton rescanFailedPluginsButton;
     juce::PluginListComponent pluginListComponent;
+    juce::Label scanStatusLabel;
 
-    /** 扫描报告防抖定时器：KnownPluginList 变化后延迟展示报告，避免扫描过程中频繁弹窗。 */
-    static constexpr int scanReportDelayMs = 500;
+    /** 扫描报告防抖计数器（以 timer tick 为单位，5 ticks × 100ms = 500ms）。 */
+    int scanReportDelayCounter = 0;
+
+    /** 扫描状态轮询与报告防抖定时器间隔（ms）。 */
+    static constexpr int scanStatusTimerMs = 100;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginManagerComponent)
 };

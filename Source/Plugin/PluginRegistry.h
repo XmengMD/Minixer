@@ -117,6 +117,9 @@ public:
     /** 返回是否正在扫描中。 */
     bool isScanInProgress() const noexcept { return scanInProgress; }
 
+    /** 返回当前正在扫描的文件路径（仅在单个文件扫描期间有效）。 */
+    juce::String getCurrentScanningFile() const noexcept;
+
 private:
     //==============================================================================
     PluginRegistry();
@@ -169,6 +172,9 @@ private:
 
     /** 最近一次扫描活动的时间，用于在消息线程扫描中自动识别扫描开始/结束。 */
     juce::Time                         lastScanActivityTime;
+
+    /** 当前正在扫描的文件路径（仅在消息线程访问）。 */
+    juce::String                       currentScanningFile;
 
     /** 当前正在执行的 findPluginTypesFor 调用数；>0 表示有扫描尚未返回。 */
     int                                activeScanCount = 0;

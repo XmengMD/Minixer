@@ -148,8 +148,8 @@ void LevelMeterComponent::showStandardMenu()
 
     menu.addSeparator();
     menu.addItem (resetStandardMenuId,
-                  juce::String::fromUTF8 ("\xe6\x81\xa2\xe5\xa4\x8d\xe9\xbb\x98\xe8\xae\xa4 (dBFS)"));
-
+                  TRANS("Reset to Default (dBFS)"));
+    
     menu.showMenuAsync (juce::PopupMenu::Options(),
                         [this] (int result)
     {

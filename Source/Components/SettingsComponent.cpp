@@ -20,6 +20,13 @@ SettingsComponent::SettingsComponent (juce::AudioDeviceManager& manager)
     setupLabel (outputDeviceLabel, TRANS ("Output Device"));
     setupComboBox (outputDeviceComboBox);
 
+    asioControlPanelButton.setLookAndFeel (&getLookAndFeel());
+    asioControlPanelButton.setColour (juce::TextButton::buttonColourId, MixerLookAndFeel::getSurfaceColour());
+    asioControlPanelButton.setColour (juce::TextButton::textColourOffId, MixerLookAndFeel::getTextColour());
+    asioControlPanelButton.addListener (this);
+    asioControlPanelButton.setVisible (false);
+    addAndMakeVisible (asioControlPanelButton);
+
     setupLabel (sampleRateLabel, TRANS ("Sample Rate"));
     setupComboBox (sampleRateComboBox);
 
@@ -62,6 +69,14 @@ SettingsComponent::SettingsComponent (juce::AudioDeviceManager& manager)
     configureShortcutsButton.addListener (this);
     addAndMakeVisible (configureShortcutsButton);
 
+    // 关于
+    setupSectionLabel (aboutSectionLabel, TRANS ("About"));
+    aboutButton.setLookAndFeel (&getLookAndFeel());
+    aboutButton.setColour (juce::TextButton::buttonColourId, MixerLookAndFeel::getSurfaceColour());
+    aboutButton.setColour (juce::TextButton::textColourOffId, MixerLookAndFeel::getTextColour());
+    aboutButton.addListener (this);
+    addAndMakeVisible (aboutButton);
+
     auto& settings = AppSettings::getInstance();
     updatingUI = true;
     launchOnStartupToggle.setToggleState   (settings.getLaunchOnStartup(),   juce::dontSendNotification);
@@ -95,8 +110,8 @@ void SettingsComponent::resized()
     auto bounds = getLocalBounds().reduced (16, 16);
     const auto labelWidth = juce::jmin (120, bounds.getWidth() / 3);
     const auto gap = 8;
-    const int numRows = 17;
-    const int numGaps = 16;
+    const int numRows = 19;
+    const int numGaps = 18;
     const auto rowHeight = juce::jmax (1, juce::jmin (32, (bounds.getHeight() - numGaps * gap)
                                                             / juce::jmax (1, numRows)));
 
@@ -122,7 +137,12 @@ void SettingsComponent::resized()
     layoutFullRow (audioSectionLabel);
     layoutRow (driverLabel,        driverComboBox);
     layoutRow (inputDeviceLabel,   inputDeviceComboBox);
-    layoutRow (outputDeviceLabel,  outputDeviceComboBox);
+
+    if (isAsioMode())
+        layoutRow (outputDeviceLabel, asioControlPanelButton);
+    else
+        layoutRow (outputDeviceLabel, outputDeviceComboBox);
+
     layoutRow (sampleRateLabel,    sampleRateComboBox);
     layoutRow (bufferSizeLabel,    bufferSizeComboBox);
 
@@ -153,6 +173,9 @@ void SettingsComponent::resized()
 
     layoutFullRow (shortcutsSectionLabel);
     layoutFullRow (configureShortcutsButton);
+
+    layoutFullRow (aboutSectionLabel);
+    layoutFullRow (aboutButton);
 }
 
 //==============================================================================
@@ -175,6 +198,12 @@ void SettingsComponent::comboBoxChanged (juce::ComboBox* comboBox)
             updateUIFromSetup();
             updatingUI = false;
         }
+    }
+    else if (comboBox == &inputDeviceComboBox && isAsioMode())
+    {
+        // ASIO 模式下 input 下拉框实际上用于选择单一 ASIO 设备
+        // 选择后需要同时更新 input/output 设备名
+        applyAsioDeviceSelection();
     }
     else
     {
@@ -219,6 +248,16 @@ void SettingsComponent::buttonClicked (juce::Button* button)
     else if (button == &configureShortcutsButton)
     {
         showShortcutsSettingsWindow();
+    }
+    else if (button == &aboutButton)
+    {
+        showAboutWindow();
+        return;
+    }
+    else if (button == &asioControlPanelButton)
+    {
+        openAsioControlPanel();
+        return;
     }
 
     notifyPreferencesChanged();
@@ -351,6 +390,43 @@ void SettingsComponent::refreshDeviceLists()
 
     type->scanForDevices();
 
+    if (isAsioMode())
+    {
+        // ASIO 模式下 input 下拉框用于选择单一 ASIO 设备
+        auto names = type->getDeviceNames (true);
+
+        for (auto& name : names)
+        {
+            if (allDeviceNames.indexOf (name) < 0)
+            {
+                allDeviceNames.add (name);
+                deviceIsInput.add (true);
+                deviceIsOutput.add (true);
+            }
+        }
+
+        // 若输入列表为空，尝试输出列表（ASIO 通常一致，但为防万一）
+        if (allDeviceNames.isEmpty())
+        {
+            names = type->getDeviceNames (false);
+
+            for (auto& name : names)
+            {
+                if (allDeviceNames.indexOf (name) < 0)
+                {
+                    allDeviceNames.add (name);
+                    deviceIsInput.add (true);
+                    deviceIsOutput.add (true);
+                }
+            }
+        }
+
+        for (int i = 0; i < allDeviceNames.size(); ++i)
+            inputDeviceComboBox.addItem (allDeviceNames[i], i + 1);
+
+        return;
+    }
+
     auto inputNames = type->getDeviceNames (true);
     auto outputNames = type->getDeviceNames (false);
 
@@ -450,6 +526,70 @@ void SettingsComponent::applyAudioSetup()
 }
 
 //==============================================================================
+void SettingsComponent::applyAsioDeviceSelection()
+{
+    if (updatingUI)
+        return;
+
+    auto setup = deviceManager.getAudioDeviceSetup();
+
+    auto inputId = inputDeviceComboBox.getSelectedId();
+    if (juce::isPositiveAndBelow (inputId - 1, allDeviceNames.size()))
+    {
+        // ASIO 设备同时作为输入和输出
+        setup.inputDeviceName  = allDeviceNames[inputId - 1];
+        setup.outputDeviceName = allDeviceNames[inputId - 1];
+    }
+
+    auto sampleRateId = sampleRateComboBox.getSelectedId();
+    if (sampleRateId > 0)
+        setup.sampleRate = static_cast<double> (sampleRateId);
+
+    auto bufferSizeId = bufferSizeComboBox.getSelectedId();
+    if (bufferSizeId > 0)
+        setup.bufferSize = bufferSizeId;
+
+    auto error = deviceManager.setAudioDeviceSetup (setup, true);
+
+    if (error.isNotEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                                                TRANS ("Audio Device Error"),
+                                                error);
+    }
+
+    notifyAudioSettingsChanged();
+}
+
+//==============================================================================
+void SettingsComponent::openAsioControlPanel()
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+
+    if (device == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                                                TRANS ("ASIO Control Panel"),
+                                                TRANS ("No ASIO device is currently open."));
+        return;
+    }
+
+    if (! device->hasControlPanel())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                                                TRANS ("ASIO Control Panel"),
+                                                TRANS ("The current device does not provide a control panel."));
+        return;
+    }
+
+    device->showControlPanel();
+
+    // 控制面板关闭后重新枚举，因为用户可能改动了采样率/缓冲区大小
+    refreshSampleRatesAndBufferSizes();
+    updateUIFromSetup();
+}
+
+//==============================================================================
 void SettingsComponent::updateUIFromSetup()
 {
     updatingUI = true;
@@ -470,6 +610,17 @@ void SettingsComponent::updateUIFromSetup()
     // 重新枚举当前类型的设备
     refreshDeviceLists();
 
+    const bool asio = isAsioMode();
+
+    // 切换 ASIO 模式下的控件显示/文本
+    inputDeviceLabel.setText (asio ? TRANS ("ASIO Device") : TRANS ("Input Device"),
+                              juce::dontSendNotification);
+    outputDeviceLabel.setText (asio ? TRANS ("ASIO Settings") : TRANS ("Output Device"),
+                               juce::dontSendNotification);
+
+    outputDeviceComboBox.setVisible (! asio);
+    asioControlPanelButton.setVisible (asio);
+
     // 同步 Input / Output 选择
     auto setup = deviceManager.getAudioDeviceSetup();
 
@@ -477,9 +628,12 @@ void SettingsComponent::updateUIFromSetup()
     if (inputIdx >= 0)
         inputDeviceComboBox.setSelectedId (inputIdx + 1, juce::dontSendNotification);
 
-    auto outputIdx = findDeviceIndex (setup.outputDeviceName);
-    if (outputIdx >= 0)
-        outputDeviceComboBox.setSelectedId (outputIdx + 1, juce::dontSendNotification);
+    if (! asio)
+    {
+        auto outputIdx = findDeviceIndex (setup.outputDeviceName);
+        if (outputIdx >= 0)
+            outputDeviceComboBox.setSelectedId (outputIdx + 1, juce::dontSendNotification);
+    }
 
     // 同步采样率/缓冲区
     refreshSampleRatesAndBufferSizes();
@@ -489,6 +643,9 @@ void SettingsComponent::updateUIFromSetup()
 
     if (setup.bufferSize > 0)
         bufferSizeComboBox.setSelectedId (setup.bufferSize, juce::dontSendNotification);
+
+    // 模式切换后需要重新布局，确保 ASIO 控制面板按钮获得正确 bounds
+    resized();
 
     updatingUI = false;
 }
@@ -527,6 +684,12 @@ juce::AudioIODeviceType* SettingsComponent::getCurrentDeviceType() const
     }
 
     return types.isEmpty() ? nullptr : types[0];
+}
+
+//==============================================================================
+bool SettingsComponent::isAsioMode() const
+{
+    return deviceManager.getCurrentAudioDeviceType().equalsIgnoreCase ("ASIO");
 }
 
 //==============================================================================
@@ -668,6 +831,50 @@ void SettingsComponent::shortcutsSettingsCancelled()
 {
     if (shortcutsSettingsWindow != nullptr)
         shortcutsSettingsWindow->setVisible (false);
+}
+
+//==============================================================================
+namespace
+{
+    //==============================================================================
+    /** 关于窗口：关闭按钮仅隐藏窗口，便于再次打开。 */
+    struct AboutWindow  : public juce::DocumentWindow
+    {
+        AboutWindow (const juce::String& name, juce::Colour bg)
+            : juce::DocumentWindow (name, bg, juce::DocumentWindow::closeButton)
+        {
+        }
+
+        void closeButtonPressed() override
+        {
+            setVisible (false);
+        }
+    };
+}
+
+//==============================================================================
+void SettingsComponent::showAboutWindow()
+{
+    if (aboutWindow == nullptr)
+    {
+        auto* content = new AboutComponent();
+
+        content->onClose = [this]
+        {
+            if (aboutWindow != nullptr)
+                aboutWindow->setVisible (false);
+        };
+
+        aboutWindow.reset (new AboutWindow (TRANS ("About Minixer"),
+                                            MixerLookAndFeel::getBackgroundColour()));
+        aboutWindow->setContentOwned (content, true);
+        aboutWindow->setUsingNativeTitleBar (true);
+        aboutWindow->setResizable (false, false);
+        aboutWindow->centreWithSize (520, 440);
+    }
+
+    aboutWindow->setVisible (true);
+    aboutWindow->toFront (true);
 }
 
 //==============================================================================

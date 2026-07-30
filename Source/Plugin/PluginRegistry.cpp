@@ -426,7 +426,17 @@ public:
             int& c;
         };
 
+        // 记录当前正在扫描的文件路径，供 UI 状态标签显示。
+        struct CurrentFileGuard
+        {
+            CurrentFileGuard (juce::String& target, const juce::String& value)
+                : target (target) { target = value; }
+            ~CurrentFileGuard() { target.clear(); }
+            juce::String& target;
+        };
+
         const ActiveScanGuard guard (registry.activeScanCount);
+        const CurrentFileGuard fileGuard (registry.currentScanningFile, fileOrIdentifier);
         const auto file = juce::File (fileOrIdentifier);
         const auto now  = juce::Time::getCurrentTime();
 
@@ -813,6 +823,12 @@ void PluginRegistry::checkAndFinishIdleScan()
 
     if ((juce::Time::getCurrentTime() - lastScanActivityTime) > juce::RelativeTime::seconds (pluginScanIdleTimeoutSeconds))
         finishScanReport();
+}
+
+//==============================================================================
+juce::String PluginRegistry::getCurrentScanningFile() const noexcept
+{
+    return currentScanningFile;
 }
 
 //==============================================================================
