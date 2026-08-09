@@ -109,7 +109,7 @@ public:
     PluginHostApplication() = default;
 
     const juce::String getApplicationName() override { return "Minixer PluginHost"; }
-    const juce::String getApplicationVersion() override { return "1.0.0"; }
+    const juce::String getApplicationVersion() override { return "0.3 Beta"; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
     void initialise (const juce::String&) override
