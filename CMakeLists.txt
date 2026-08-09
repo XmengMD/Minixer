@@ -33,7 +33,7 @@ if(NOT JUCE_DIR)
         "$ENV{USERPROFILE}/source/JUCE"
         "$ENV{USERPROFILE}/source/repos/JUCE"
         "$ENV{ProgramFiles}/JUCE"
-        "$ENV{ProgramFiles(x86)}/JUCE"
+        "$ENV{ProgramFiles\(x86\)}/JUCE"
         "C:/JUCE"
         "D:/JUCE")
 
