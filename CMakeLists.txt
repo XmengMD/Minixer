@@ -25,6 +25,16 @@ if(NOT DEFINED JUCE_DIR)
 endif()
 
 if(NOT JUCE_DIR)
+    # ProgramFiles(x86) 环境变量名包含括号，无法直接用 $ENV{...} 读取，
+    # 这里通过 cmd 获取，避免 CMake 解析错误。
+    if(WIN32)
+        execute_process(
+            COMMAND cmd /c "echo %ProgramFiles(x86)%"
+            OUTPUT_VARIABLE _program_files_x86
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+
     set(_juce_candidates
         "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../JUCE"
@@ -33,7 +43,7 @@ if(NOT JUCE_DIR)
         "$ENV{USERPROFILE}/source/JUCE"
         "$ENV{USERPROFILE}/source/repos/JUCE"
         "$ENV{ProgramFiles}/JUCE"
-        "$ENV{ProgramFiles(x86)}/JUCE"
+        "${_program_files_x86}/JUCE"
         "C:/JUCE"
         "D:/JUCE")
 
