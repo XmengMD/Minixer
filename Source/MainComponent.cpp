@@ -749,35 +749,47 @@ bool MainComponent::ensureStereoChannelsIfAvailable()
     auto desiredOutputChannels = juce::jmin (2, maxOutputChannels);
 
     bool needsUpdate = false;
+    const bool isAsio = audioDeviceManager.getCurrentAudioDeviceType().equalsIgnoreCase ("ASIO");
 
-    auto channelsEnabledCorrectly = [] (const juce::BigInteger& channels, int desiredCount)
+    auto configureChannels = [isAsio, &needsUpdate] (juce::BigInteger& channels,
+                                                     int desiredCount,
+                                                     int maxCount)
     {
-        for (int i = 0; i < desiredCount; ++i)
+        // 清除超出当前设备可用范围的无效位
+        for (int i = channels.getHighestBit(); --i >= maxCount;)
         {
-            if (! channels[i])
-                return false;
+            if (channels[i])
+            {
+                channels.clearBit (i);
+                needsUpdate = true;
+            }
         }
 
-        return true;
+        auto activeCount = channels.countNumberOfSetBits();
+
+        if (activeCount == 0 && maxCount > 0)
+        {
+            // 没有任何通道启用时，启用默认前两个（或唯一一个）通道
+            channels.clear();
+            for (int i = 0; i < desiredCount; ++i)
+                channels.setBit (i);
+
+            needsUpdate = true;
+        }
+        else if (! isAsio && activeCount < desiredCount)
+        {
+            // 非 ASIO 模式下，强制启用前两个通道，避免驱动默认只开一个
+            channels.clear();
+            for (int i = 0; i < desiredCount; ++i)
+                channels.setBit (i);
+
+            needsUpdate = true;
+        }
+        // ASIO 模式下保留用户显式选择的通道（只要有效且至少有一个）
     };
 
-    if (! channelsEnabledCorrectly (setup.inputChannels, desiredInputChannels))
-    {
-        setup.inputChannels.clear();
-        for (int i = 0; i < desiredInputChannels; ++i)
-            setup.inputChannels.setBit (i);
-
-        needsUpdate = true;
-    }
-
-    if (! channelsEnabledCorrectly (setup.outputChannels, desiredOutputChannels))
-    {
-        setup.outputChannels.clear();
-        for (int i = 0; i < desiredOutputChannels; ++i)
-            setup.outputChannels.setBit (i);
-
-        needsUpdate = true;
-    }
+    configureChannels (setup.inputChannels,  desiredInputChannels,  maxInputChannels);
+    configureChannels (setup.outputChannels, desiredOutputChannels, maxOutputChannels);
 
     if (needsUpdate)
     {

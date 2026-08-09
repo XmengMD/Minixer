@@ -171,7 +171,9 @@ set(_minixer_sources
     Source/Components/ShortcutsSettingsComponent.cpp
     Source/Components/ShortcutsSettingsComponent.h
     Source/Components/AboutComponent.cpp
-    Source/Components/AboutComponent.h)
+    Source/Components/AboutComponent.h
+    Source/Components/AsioAdvancedSettingsComponent.cpp
+    Source/Components/AsioAdvancedSettingsComponent.h)
 
 set(_pluginhost_sources
     Source/PluginHost/Main.cpp

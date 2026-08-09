@@ -67,6 +67,7 @@ private:
     void applyAudioSetup();
     void applyAsioDeviceSelection();
     void openAsioControlPanel();
+    void showAsioAdvancedWindow();
     void updateUIFromSetup();
     void updateAutoLoadPresetEnabledState();
     void launchAutoLoadPresetFileChooser();
@@ -101,6 +102,7 @@ private:
     juce::Label outputDeviceLabel;
     juce::ComboBox outputDeviceComboBox;
     juce::TextButton asioControlPanelButton { TRANS("Open ASIO Control Panel") };
+    juce::TextButton asioAdvancedButton     { TRANS("Advanced...") };
 
     juce::Label sampleRateLabel;
     juce::ComboBox sampleRateComboBox;

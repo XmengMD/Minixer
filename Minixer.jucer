@@ -95,6 +95,10 @@
               file="Source/Components/ShortcutsSettingsComponent.h"/>
         <FILE id="Cmp020" name="ShortcutsSettingsComponent.cpp" compile="1" resource="0"
               file="Source/Components/ShortcutsSettingsComponent.cpp"/>
+        <FILE id="Cmp021" name="AsioAdvancedSettingsComponent.h" compile="0" resource="0"
+              file="Source/Components/AsioAdvancedSettingsComponent.h"/>
+        <FILE id="Cmp022" name="AsioAdvancedSettingsComponent.cpp" compile="1" resource="0"
+              file="Source/Components/AsioAdvancedSettingsComponent.cpp"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>
