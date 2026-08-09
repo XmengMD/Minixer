@@ -1,6 +1,7 @@
 #include "SettingsComponent.h"
 #include "../LookAndFeel/MixerLookAndFeel.h"
 #include "../Plugin/PluginRegistry.h"
+#include "AsioAdvancedSettingsComponent.h"
 
 namespace minixer
 {
@@ -26,6 +27,13 @@ SettingsComponent::SettingsComponent (juce::AudioDeviceManager& manager)
     asioControlPanelButton.addListener (this);
     asioControlPanelButton.setVisible (false);
     addAndMakeVisible (asioControlPanelButton);
+
+    asioAdvancedButton.setLookAndFeel (&getLookAndFeel());
+    asioAdvancedButton.setColour (juce::TextButton::buttonColourId, MixerLookAndFeel::getSurfaceColour());
+    asioAdvancedButton.setColour (juce::TextButton::textColourOffId, MixerLookAndFeel::getTextColour());
+    asioAdvancedButton.addListener (this);
+    asioAdvancedButton.setVisible (false);
+    addAndMakeVisible (asioAdvancedButton);
 
     setupLabel (sampleRateLabel, TRANS ("Sample Rate"));
     setupComboBox (sampleRateComboBox);
@@ -145,9 +153,21 @@ void SettingsComponent::resized()
     layoutRow (inputDeviceLabel,   inputDeviceComboBox);
 
     if (isAsioMode())
-        layoutRow (outputDeviceLabel, asioControlPanelButton);
+    {
+        auto row = bounds.removeFromTop (rowHeight);
+        outputDeviceLabel.setBounds (row.removeFromLeft (labelWidth));
+        row.removeFromLeft (gap);
+
+        const auto advancedWidth = juce::jmin (90, row.getWidth() / 3);
+        asioAdvancedButton.setBounds (row.removeFromRight (advancedWidth));
+        row.removeFromRight (gap);
+        asioControlPanelButton.setBounds (row);
+        bounds.removeFromTop (gap);
+    }
     else
+    {
         layoutRow (outputDeviceLabel, outputDeviceComboBox);
+    }
 
     layoutRow (sampleRateLabel,    sampleRateComboBox);
     layoutRow (bufferSizeLabel,    bufferSizeComboBox);
@@ -263,6 +283,11 @@ void SettingsComponent::buttonClicked (juce::Button* button)
     else if (button == &asioControlPanelButton)
     {
         openAsioControlPanel();
+        return;
+    }
+    else if (button == &asioAdvancedButton)
+    {
+        showAsioAdvancedWindow();
         return;
     }
 
@@ -596,6 +621,34 @@ void SettingsComponent::openAsioControlPanel()
 }
 
 //==============================================================================
+void SettingsComponent::showAsioAdvancedWindow()
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+
+    if (device == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                                                TRANS ("ASIO Channel Routing"),
+                                                TRANS ("No ASIO device is currently open."));
+        return;
+    }
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = TRANS ("ASIO Channel Routing");
+    options.dialogBackgroundColour = MixerLookAndFeel::getBackgroundColour();
+    options.content.setOwned (new AsioAdvancedSettingsComponent (deviceManager, [this] {
+        refreshSampleRatesAndBufferSizes();
+        updateUIFromSetup();
+    }));
+    options.componentToCentreAround = this;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+
+    juce::ignoreUnused (options.launchAsync());
+}
+
+//==============================================================================
 void SettingsComponent::updateUIFromSetup()
 {
     updatingUI = true;
@@ -626,6 +679,7 @@ void SettingsComponent::updateUIFromSetup()
 
     outputDeviceComboBox.setVisible (! asio);
     asioControlPanelButton.setVisible (asio);
+    asioAdvancedButton.setVisible (asio);
 
     // 同步 Input / Output 选择
     auto setup = deviceManager.getAudioDeviceSetup();
