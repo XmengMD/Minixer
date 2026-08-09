@@ -13,7 +13,7 @@ AboutComponent::AboutComponent()
     titleLabel.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (titleLabel);
 
-    versionLabel.setText (TRANS("Version 1.0.0"), juce::dontSendNotification);
+    versionLabel.setText (TRANS("Version 0.3 Beta"), juce::dontSendNotification);
     versionLabel.setFont (juce::Font (juce::FontOptions (14.0f)));
     versionLabel.setColour (juce::Label::textColourId, MixerLookAndFeel::getMutedTextColour());
     versionLabel.setJustificationType (juce::Justification::centred);
