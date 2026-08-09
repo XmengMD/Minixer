@@ -88,7 +88,7 @@ Minixer/
 ## 注意事项
 
 - 本项目**不包含 ASIO SDK**，默认使用 WASAPI / DirectSound 音频驱动。如需 ASIO 支持，请自行下载 Steinberg ASIO SDK 并配置项目。
-- 推荐使用 CMake 构建。Projucer 工作流仍可通过 `Minixer.jucer` 使用，但其导出的 Visual Studio 工程可能包含本机绝对路径，换机或上传前需重新配置Minixer.jucer中的JUCE模块包含路径。
+- 推荐使用 CMake 构建。Projucer 工作流仍可通过 `Minixer.jucer` 使用，但其导出的 Visual Studio 工程可能包含本机绝对路径，换机或上传前需重新配置Minixer.jucer中的JUCE模块包含路径。每当CMakeLists.txt更新时，需同步更新Minixer.jucer中的JUCE模块包含路径。
 - 项目仅支持 VST3 插件，不支持 VST2 / AAX。
 - 运行时需要 `PluginHost64.exe` 与 `PluginHost32.exe` 与主程序位于同一目录，用于加载 64-bit / 32-bit 插件的沙盒子进程。
 
@@ -190,7 +190,7 @@ Minixer/
 ## Notes
 
 - This project **does not include the ASIO SDK** and uses WASAPI / DirectSound by default. Add the Steinberg ASIO SDK manually if ASIO support is required.
-- CMake is the recommended build system. The Projucer workflow is still available via `Minixer.jucer`, but may contain machine-specific absolute JUCE module include paths that need to be reconfigured before use on another machine.
+- CMake is the recommended build system. The Projucer workflow is still available via `Minixer.jucer`, but may contain machine-specific absolute JUCE module include paths that need to be reconfigured before use on another machine. Whenever CMakeLists.txt is updated, please also update Minixer.jucer accordingly.
 - Only VST3 plugins are supported; VST2 / AAX are not supported.
 - At runtime, `PluginHost64.exe` and `PluginHost32.exe` must be in the same directory as the main executable, as they are used to sandbox 64-bit and 32-bit plugins.
 
