@@ -3,6 +3,7 @@ name: Sync Release to Gitee
 on:
   release:
     types: [published]
+  workflow_dispatch:  # 支持手动触发Action
 
 jobs:
   sync-release:
