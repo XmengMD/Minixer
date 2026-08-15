@@ -1,13 +1,25 @@
+# =============================================================================
+# 名称: Sync GitHub Release to Gitee
+# 触发:
+#   1. release published —— 正常发版时自动触发
+#   2. workflow_dispatch —— 手动触发，输入已有 Release 的 tag 即可同步
+# =============================================================================
 name: Sync Release to Gitee
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要同步的 GitHub Release Tag（如 v0.3）'
+        required: true
+        type: string
 
 jobs:
   sync-release:
     runs-on: ubuntu-latest
-    name: Sync ${{ github.event.release.tag_name }} to Gitee
+    name: Sync to Gitee
     
     env:
       # Gitee 必须严格匹配 URL 中的全小写
@@ -15,55 +27,105 @@ jobs:
       GITEE_REPO: minixer
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       
-      # GitHub 部分由事件上下文自动注入，无需手动写死
-      GH_TAG: ${{ github.event.release.tag_name }}
-      GH_RELEASE_NAME: ${{ github.event.release.name }}
-      GH_RELEASE_BODY: ${{ github.event.release.body }}
-      GH_PRERELEASE: ${{ github.event.release.prerelease }}
-      GH_RELEASE_URL: ${{ github.event.release.html_url }}
-      GH_API_URL: ${{ github.event.release.url }}
-      
     steps:
+      # -----------------------------------------------------------------------
+      # 步骤 0: 统一获取 Release 信息（兼容自动触发 & 手动触发）
+      # -----------------------------------------------------------------------
+      - name: Resolve Release Info
+        id: release_info
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            # 自动触发模式：直接从事件上下文读取
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+            echo "name=${{ github.event.release.name }}" >> $GITHUB_OUTPUT
+            echo "body<<EOF" >> $GITHUB_OUTPUT
+            echo "${{ github.event.release.body }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "prerelease=${{ github.event.release.prerelease }}" >> $GITHUB_OUTPUT
+            echo "html_url=${{ github.event.release.html_url }}" >> $GITHUB_OUTPUT
+            echo "api_url=${{ github.event.release.url }}" >> $GITHUB_OUTPUT
+          else
+            # 手动触发模式：通过 GitHub API 获取指定 tag 的 release
+            TAG="${{ inputs.tag }}"
+            echo "🔍 Fetching release info for tag: $TAG"
+            
+            RESPONSE=$(curl -sL -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
+            
+            TAG_NAME=$(echo "$RESPONSE" | jq -r '.tag_name // empty')
+            if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "null" ]; then
+              echo "::error::Release '$TAG' not found on GitHub."
+              echo "Response: $RESPONSE"
+              exit 1
+            fi
+            
+            echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+            echo "name=$(echo "$RESPONSE" | jq -r '.name')" >> $GITHUB_OUTPUT
+            echo "body<<EOF" >> $GITHUB_OUTPUT
+            echo "$RESPONSE" | jq -r '.body' >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "prerelease=$(echo "$RESPONSE" | jq -r '.prerelease')" >> $GITHUB_OUTPUT
+            echo "html_url=$(echo "$RESPONSE" | jq -r '.html_url')" >> $GITHUB_OUTPUT
+            echo "api_url=$(echo "$RESPONSE" | jq -r '.url')" >> $GITHUB_OUTPUT
+            echo "✅ Resolved release: $TAG_NAME"
+          fi
+
+      # -----------------------------------------------------------------------
+      # 步骤 1: 下载 GitHub Release 附件
+      # -----------------------------------------------------------------------
       - name: Download GitHub Release Assets
         run: |
           mkdir -p ./assets
+          API_URL="${{ steps.release_info.outputs.api_url }}"
+          
+          echo "📥 Fetching assets from: $API_URL"
           ASSET_URLS=$(curl -sL -H "Accept: application/vnd.github+json" \
-            "${GH_API_URL}" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "$API_URL" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
           
           if [ -z "$ASSET_URLS" ]; then
-            echo "⚠️ No assets found."
-            exit 0
+            echo "⚠️ No assets found in this release."
+          else
+            echo "$ASSET_URLS" | while IFS=$'\t' read -r name url; do
+              echo "  ⬇️ $name"
+              curl -sL -o "./assets/$name" "$url"
+            done
+            echo "✅ Downloaded assets:"
+            ls -lh ./assets/
           fi
-          
-          echo "$ASSET_URLS" | while IFS=$'\t' read -r name url; do
-            echo "Downloading: $name"
-            curl -sL -o "./assets/$name" "$url"
-          done
-          ls -lh ./assets/
 
+      # -----------------------------------------------------------------------
+      # 步骤 2: 在 Gitee 创建 Release
+      # -----------------------------------------------------------------------
       - name: Create or Get Gitee Release
         id: gitee_release
         run: |
-          BODY="${{ github.event.release.body }}"
+          TAG="${{ steps.release_info.outputs.tag }}"
+          NAME="${{ steps.release_info.outputs.name }}"
+          BODY="${{ steps.release_info.outputs.body }}"
+          PRERELEASE="${{ steps.release_info.outputs.prerelease }}"
+          GH_URL="${{ steps.release_info.outputs.html_url }}"
+          
           FOOTER="
           
           ---
-          > 📦 原始 Release: ${GH_RELEASE_URL}
+          > 📦 原始 Release: ${GH_URL}
           > 🔧 源码仓库: https://github.com/XmengMD/Minixer
           > ⚖️ 许可证: AGPL-3.0"
           
           FULL_BODY="${BODY}${FOOTER}"
           
-          echo "Creating Gitee release for tag: $GH_TAG"
+          echo "📝 Creating Gitee release for tag: $TAG"
           
           RESPONSE=$(curl -sL -X POST \
             "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "access_token=${GITEE_TOKEN}" \
-            -d "tag_name=${GH_TAG}" \
-            -d "name=${GH_RELEASE_NAME}" \
+            -d "tag_name=${TAG}" \
+            -d "name=${NAME}" \
             -d "body=${FULL_BODY}" \
-            -d "prerelease=${GH_PRERELEASE}" \
+            -d "prerelease=${PRERELEASE}" \
             -d "target_commitish=master")
           
           RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
@@ -72,9 +134,9 @@ jobs:
             echo "✅ Created new release, ID: $RELEASE_ID"
             echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
           else
-            echo "Release may exist, fetching..."
+            echo "⚠️ Create failed, trying to get existing release..."
             EXISTING=$(curl -sL \
-              "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${GH_TAG}" \
+              "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${TAG}" \
               -d "access_token=${GITEE_TOKEN}")
             RELEASE_ID=$(echo "$EXISTING" | jq -r '.id // empty')
             
@@ -82,19 +144,24 @@ jobs:
               echo "✅ Found existing release, ID: $RELEASE_ID"
               echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
             else
-              echo "::error::Failed: $RESPONSE"
+              echo "::error::Failed to create or find Gitee release."
+              echo "Response: $RESPONSE"
               exit 1
             fi
           fi
 
+      # -----------------------------------------------------------------------
+      # 步骤 3: 上传附件到 Gitee
+      # -----------------------------------------------------------------------
       - name: Upload Assets to Gitee
         if: steps.gitee_release.outputs.release_id != ''
         run: |
           RELEASE_ID="${{ steps.gitee_release.outputs.release_id }}"
+          
           for file in ./assets/*; do
             [ -e "$file" ] || continue
             filename=$(basename "$file")
-            echo "Uploading: $filename"
+            echo "📤 Uploading: $filename"
             
             HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" \
               -X POST \
@@ -108,3 +175,20 @@ jobs:
               echo "  ❌ $filename (HTTP $HTTP_CODE)"
             fi
           done
+
+      # -----------------------------------------------------------------------
+      # 步骤 4: 结果摘要
+      # -----------------------------------------------------------------------
+      - name: Summary
+        if: always()
+        run: |
+          TAG="${{ steps.release_info.outputs.tag }}"
+          echo "## Sync Result" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: \`${TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source**: https://github.com/XmengMD/Minixer/releases/tag/${TAG}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target**: https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/${TAG}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "failure" ]; then
+            echo "- **Status**: ❌ Failed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Status**: ✅ Success" >> $GITHUB_STEP_SUMMARY
+          fi
