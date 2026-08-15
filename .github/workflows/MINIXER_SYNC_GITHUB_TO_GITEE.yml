@@ -1,0 +1,110 @@
+name: Sync Release to Gitee
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    name: Sync ${{ github.event.release.tag_name }} to Gitee
+    
+    env:
+      # Gitee 必须严格匹配 URL 中的全小写
+      GITEE_OWNER: xmengmd
+      GITEE_REPO: minixer
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      
+      # GitHub 部分由事件上下文自动注入，无需手动写死
+      GH_TAG: ${{ github.event.release.tag_name }}
+      GH_RELEASE_NAME: ${{ github.event.release.name }}
+      GH_RELEASE_BODY: ${{ github.event.release.body }}
+      GH_PRERELEASE: ${{ github.event.release.prerelease }}
+      GH_RELEASE_URL: ${{ github.event.release.html_url }}
+      GH_API_URL: ${{ github.event.release.url }}
+      
+    steps:
+      - name: Download GitHub Release Assets
+        run: |
+          mkdir -p ./assets
+          ASSET_URLS=$(curl -sL -H "Accept: application/vnd.github+json" \
+            "${GH_API_URL}" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
+          
+          if [ -z "$ASSET_URLS" ]; then
+            echo "⚠️ No assets found."
+            exit 0
+          fi
+          
+          echo "$ASSET_URLS" | while IFS=$'\t' read -r name url; do
+            echo "Downloading: $name"
+            curl -sL -o "./assets/$name" "$url"
+          done
+          ls -lh ./assets/
+
+      - name: Create or Get Gitee Release
+        id: gitee_release
+        run: |
+          BODY="${{ github.event.release.body }}"
+          FOOTER="
+          
+          ---
+          > 📦 原始 Release: ${GH_RELEASE_URL}
+          > 🔧 源码仓库: https://github.com/XmengMD/Minixer
+          > ⚖️ 许可证: AGPL-3.0"
+          
+          FULL_BODY="${BODY}${FOOTER}"
+          
+          echo "Creating Gitee release for tag: $GH_TAG"
+          
+          RESPONSE=$(curl -sL -X POST \
+            "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "access_token=${GITEE_TOKEN}" \
+            -d "tag_name=${GH_TAG}" \
+            -d "name=${GH_RELEASE_NAME}" \
+            -d "body=${FULL_BODY}" \
+            -d "prerelease=${GH_PRERELEASE}" \
+            -d "target_commitish=master")
+          
+          RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+          
+          if [ -n "$RELEASE_ID" ] && [ "$RELEASE_ID" != "null" ]; then
+            echo "✅ Created new release, ID: $RELEASE_ID"
+            echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+          else
+            echo "Release may exist, fetching..."
+            EXISTING=$(curl -sL \
+              "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${GH_TAG}" \
+              -d "access_token=${GITEE_TOKEN}")
+            RELEASE_ID=$(echo "$EXISTING" | jq -r '.id // empty')
+            
+            if [ -n "$RELEASE_ID" ] && [ "$RELEASE_ID" != "null" ]; then
+              echo "✅ Found existing release, ID: $RELEASE_ID"
+              echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+            else
+              echo "::error::Failed: $RESPONSE"
+              exit 1
+            fi
+          fi
+
+      - name: Upload Assets to Gitee
+        if: steps.gitee_release.outputs.release_id != ''
+        run: |
+          RELEASE_ID="${{ steps.gitee_release.outputs.release_id }}"
+          for file in ./assets/*; do
+            [ -e "$file" ] || continue
+            filename=$(basename "$file")
+            echo "Uploading: $filename"
+            
+            HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" \
+              -X POST \
+              "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${RELEASE_ID}/attach_files" \
+              -F "access_token=${GITEE_TOKEN}" \
+              -F "file=@${file}")
+            
+            if [ "$HTTP_CODE" = "201" ]; then
+              echo "  ✅ $filename"
+            else
+              echo "  ❌ $filename (HTTP $HTTP_CODE)"
+            fi
+          done
