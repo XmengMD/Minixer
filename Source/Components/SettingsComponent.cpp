@@ -1,6 +1,7 @@
 #include "SettingsComponent.h"
 #include "../LookAndFeel/MixerLookAndFeel.h"
 #include "../Plugin/PluginRegistry.h"
+#include "../Settings/AppSettings.h"
 #include "AsioAdvancedSettingsComponent.h"
 
 namespace minixer
@@ -639,6 +640,10 @@ void SettingsComponent::showAsioAdvancedWindow()
     options.content.setOwned (new AsioAdvancedSettingsComponent (deviceManager, [this] {
         refreshSampleRatesAndBufferSizes();
         updateUIFromSetup();
+
+        // ASIO 通道路由变更后即时持久化，避免只在主窗口析构时才写入 AudioDeviceState.xml
+        if (auto xml = deviceManager.createStateXml())
+            AppSettings::getInstance().saveAudioDeviceState (*xml);
     }));
     options.componentToCentreAround = this;
     options.escapeKeyTriggersCloseButton = true;
