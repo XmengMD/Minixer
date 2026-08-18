@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(Minixer
-    VERSION 0.3.0
+    VERSION 0.4.1
     DESCRIPTION "轻量级单通道独立音频混音台"
     LANGUAGES CXX C)
 
@@ -133,6 +133,8 @@ set(_minixer_sources
     Source/Plugin/PluginBlacklist.cpp
     Source/Plugin/PluginBlacklist.h
     Source/Plugin/PluginSlotState.h
+    Source/Plugin/PluginSelectorComponent.cpp
+    Source/Plugin/PluginSelectorComponent.h
     Source/IPC/IpcProtocol.h
     Source/IPC/IpcTransport.h
     Source/IPC/SharedMemoryRegion.h
@@ -195,7 +197,7 @@ set(_pluginhost_sources
 # Minixer 主程序固定为 64 位。32 位构建仅用于生成 PluginHost32.exe。
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     juce_add_gui_app(Minixer
-        VERSION     0.3.0
+        VERSION     0.4.1
         COMPANY_NAME ""
         PRODUCT_NAME "Minixer"
         IS_SYNTHESIZER          FALSE
@@ -263,7 +265,7 @@ endif()
 #         cmake -B build-x64 -A x64
 #         cmake -B build-x86 -A Win32
 juce_add_console_app(PluginHost
-    VERSION     0.3.0
+    VERSION     0.4.1
     COMPANY_NAME ""
     PRODUCT_NAME "Minixer PluginHost")
 

@@ -57,6 +57,11 @@ public:
     int getOutputMeterStandard() const noexcept       { return outputMeterStandard; }
     void setOutputMeterStandard (int standard);
 
+    /** 返回插件选择对话框的搜索匹配字段索引。
+        0=Name, 1=Manufacturer, 2=Category, 3=All。默认 0（仅匹配插件名）。 */
+    int getPluginSelectorSearchMode() const noexcept  { return pluginSelectorSearchMode; }
+    void setPluginSelectorSearchMode (int mode);
+
     //==============================================================================
     /** 返回应用数据目录（%AppData%/Minixer），不存在时会自动创建。 */
     juce::File getAppDataDirectory() const;
@@ -133,6 +138,7 @@ private:
     juce::String autoLoadPresetPath;
     int inputMeterStandard = 0;
     int outputMeterStandard = 0;
+    int pluginSelectorSearchMode = 0;
 
     ShortcutSettings shortcutSettings;
 

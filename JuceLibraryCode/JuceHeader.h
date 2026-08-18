@@ -41,7 +41,7 @@ namespace ProjectInfo
 {
     const char* const  projectName    = "Minixer";
     const char* const  companyName    = "";
-    const char* const  versionString  = "0.3 Beta";
-    const int          versionNumber  = 0x30000;
+    const char* const  versionString  = "0.4.1 Beta";
+    const int          versionNumber  = 0x40100;
 }
 #endif
