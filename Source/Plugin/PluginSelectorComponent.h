@@ -8,7 +8,7 @@ namespace minixer
 //==============================================================================
 /** 插件选择对话框内容组件。
 
-    提供搜索框、可滚动插件列表以及显式关闭按钮，用于替代会撑满屏幕的 PopupMenu。
+    提供搜索框、可滚动插件列表以及清空搜索按钮，用于替代会撑满屏幕的 PopupMenu。
 */
 class PluginSelectorComponent  : public juce::Component,
                                  private juce::TextEditor::Listener,
@@ -66,7 +66,7 @@ private:
     //==============================================================================
     juce::TextEditor searchEditor;
     juce::ComboBox criteriaBox { "SearchCriteria" };
-    juce::TextButton closeButton { "X" };
+    juce::TextButton clearSearchButton { "AC" };  // 清空搜索
     juce::ListBox listBox { "PluginSelectorListBox", this };
     juce::Label emptyLabel;
 

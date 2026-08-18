@@ -2,7 +2,7 @@
   ==============================================================================
 
     PluginSelectorComponent.cpp
-    带搜索和关闭按钮的插件选择对话框内容组件。
+    带搜索和清空搜索按钮的插件选择对话框内容组件。
 
   ==============================================================================
 */
@@ -44,7 +44,7 @@ PluginSelectorComponent::PluginSelectorComponent (juce::Array<juce::PluginDescri
 
     addAndMakeVisible (searchEditor);
     addAndMakeVisible (criteriaBox);
-    addAndMakeVisible (closeButton);
+    addAndMakeVisible (clearSearchButton);
     addAndMakeVisible (listBox);
     addChildComponent (emptyLabel);
 
@@ -66,7 +66,13 @@ PluginSelectorComponent::PluginSelectorComponent (juce::Array<juce::PluginDescri
     searchEditor.setSelectAllWhenFocused (true);
     searchEditor.addListener (this);
 
-    closeButton.onClick = [this] { commitSelection (nullptr); };
+    clearSearchButton.onClick = [this]
+    {
+        searchEditor.clear();
+        applyFilter();
+        searchEditor.grabKeyboardFocus();
+    };
+    clearSearchButton.setTooltip (TRANS("Clear search"));
 
     listBox.setRowHeight (28);
     listBox.setMultipleSelectionEnabled (false);
@@ -90,9 +96,9 @@ void PluginSelectorComponent::resized()
     auto bounds = getLocalBounds().reduced (8);
     auto header = bounds.removeFromTop (32);
 
-    closeButton.setBounds (header.removeFromRight (32)
-                                  .withHeight (24)
-                                  .withY (header.getCentreY() - 12));
+    clearSearchButton.setBounds (header.removeFromRight (32)
+                                        .withHeight (24)
+                                        .withY (header.getCentreY() - 12));
     criteriaBox.setBounds (header.removeFromRight (100)
                                   .withHeight (24)
                                   .withY (header.getCentreY() - 12)
