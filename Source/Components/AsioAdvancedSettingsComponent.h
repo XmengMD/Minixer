@@ -35,6 +35,7 @@ private:
 
     void refreshChannelLists();
     void updateUIFromSetup();
+    void resetUIToDefaults();
     void applyChannelSetup();
 
     static int getNthSetBit (const juce::BigInteger& channels, int n);
@@ -61,6 +62,7 @@ private:
 
     juce::TextButton okButton     { TRANS("OK") };
     juce::TextButton cancelButton { TRANS("Cancel") };
+    juce::TextButton resetButton  { TRANS("Reset") };
 
     bool updatingUI = false;
 

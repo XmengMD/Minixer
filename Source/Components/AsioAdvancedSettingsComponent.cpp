@@ -30,6 +30,7 @@ AsioAdvancedSettingsComponent::AsioAdvancedSettingsComponent (juce::AudioDeviceM
 
     setupButton (okButton,     TRANS ("OK"));
     setupButton (cancelButton, TRANS ("Cancel"));
+    setupButton (resetButton,  TRANS ("Reset"));
 
     refreshChannelLists();
     updateUIFromSetup();
@@ -69,13 +70,15 @@ void AsioAdvancedSettingsComponent::resized()
     layoutRow (outputLeftLabel,  outputLeftComboBox);
     layoutRow (outputRightLabel, outputRightComboBox);
 
-    // 按钮行：OK / Cancel 右对齐
+    // 按钮行：Reset 左对齐，OK / Cancel 右对齐
     {
-        const auto buttonWidth = 80;
+        const auto okCancelWidth = 80;
+        const auto resetWidth    = 70;
         auto row = bounds.removeFromTop (rowHeight);
-        cancelButton.setBounds (row.removeFromRight (buttonWidth));
+        cancelButton.setBounds (row.removeFromRight (okCancelWidth));
         row.removeFromRight (gap);
-        okButton.setBounds (row.removeFromRight (buttonWidth));
+        okButton.setBounds (row.removeFromRight (okCancelWidth));
+        resetButton.setBounds (row.removeFromLeft (resetWidth));
     }
 }
 
@@ -94,6 +97,10 @@ void AsioAdvancedSettingsComponent::buttonClicked (juce::Button* button)
     else if (button == &cancelButton)
     {
         closeDialog();
+    }
+    else if (button == &resetButton)
+    {
+        resetUIToDefaults();
     }
 }
 
@@ -221,6 +228,34 @@ void AsioAdvancedSettingsComponent::updateUIFromSetup()
 }
 
 //==============================================================================
+void AsioAdvancedSettingsComponent::resetUIToDefaults()
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return;
+
+    auto selectDefault = [] (juce::ComboBox& leftBox, juce::ComboBox& rightBox, int maxChannels)
+    {
+        if (maxChannels <= 0)
+        {
+            leftBox.setSelectedId  (0, juce::dontSendNotification);
+            rightBox.setSelectedId (0, juce::dontSendNotification);
+            return;
+        }
+
+        leftBox.setSelectedId (1, juce::dontSendNotification);
+
+        if (rightBox.isEnabled() && maxChannels > 1)
+            rightBox.setSelectedId (2, juce::dontSendNotification);
+        else
+            rightBox.setSelectedId (0, juce::dontSendNotification);
+    };
+
+    selectDefault (inputLeftComboBox,  inputRightComboBox,  device->getInputChannelNames().size());
+    selectDefault (outputLeftComboBox, outputRightComboBox, device->getOutputChannelNames().size());
+}
+
+//==============================================================================
 void AsioAdvancedSettingsComponent::applyChannelSetup()
 {
     auto setup = deviceManager.getAudioDeviceSetup();
@@ -250,6 +285,11 @@ void AsioAdvancedSettingsComponent::applyChannelSetup()
 
     apply (setup.inputChannels,  inputLeftComboBox,  inputRightComboBox,  device->getInputChannelNames().size());
     apply (setup.outputChannels, outputLeftComboBox, outputRightComboBox, device->getOutputChannelNames().size());
+
+    // 标记通道为用户显式选择，防止 JUCE 在 setAudioDeviceSetup 内部
+    // 按 "useDefault*Channels" 把位图强制重置为前 N 个通道。
+    setup.useDefaultInputChannels  = false;
+    setup.useDefaultOutputChannels = false;
 
     auto error = deviceManager.setAudioDeviceSetup (setup, true);
 
