@@ -33,6 +33,7 @@ AppSettings::AppSettings()
         autoLoadPresetPath = user->getValue       ("autoLoadPresetPath", juce::String());
         inputMeterStandard = user->getIntValue    ("inputMeterStandard", 0);
         outputMeterStandard= user->getIntValue    ("outputMeterStandard",0);
+        pluginSelectorSearchMode = user->getIntValue ("pluginSelectorSearchMode", 0);
 
         // 兼容旧版只保存了 preset 名称的配置：将其视为默认 Presets 目录下的文件。
         if (autoLoadPresetPath.isNotEmpty() && ! juce::File::isAbsolutePath (autoLoadPresetPath))
@@ -170,6 +171,22 @@ void AppSettings::setOutputMeterStandard (int standard)
 
     if (auto* user = props->getUserSettings())
         user->setValue ("outputMeterStandard", outputMeterStandard);
+
+    save();
+}
+
+//==============================================================================
+void AppSettings::setPluginSelectorSearchMode (int mode)
+{
+    mode = juce::jlimit (0, 3, mode);
+
+    if (pluginSelectorSearchMode == mode)
+        return;
+
+    pluginSelectorSearchMode = mode;
+
+    if (auto* user = props->getUserSettings())
+        user->setValue ("pluginSelectorSearchMode", pluginSelectorSearchMode);
 
     save();
 }

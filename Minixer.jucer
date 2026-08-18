@@ -32,6 +32,8 @@
         <FILE id="Plg015" name="PluginBridgeNode.cpp" compile="1" resource="0" file="Source/Plugin/PluginBridgeNode.cpp"/>
         <FILE id="Plg016" name="PluginBlacklist.h" compile="0" resource="0" file="Source/Plugin/PluginBlacklist.h"/>
         <FILE id="Plg017" name="PluginBlacklist.cpp" compile="1" resource="0" file="Source/Plugin/PluginBlacklist.cpp"/>
+      <FILE id="Plg018" name="PluginSelectorComponent.h" compile="0" resource="0" file="Source/Plugin/PluginSelectorComponent.h"/>
+      <FILE id="Plg019" name="PluginSelectorComponent.cpp" compile="1" resource="0" file="Source/Plugin/PluginSelectorComponent.cpp"/>
       </GROUP>
       <GROUP id="{IPC-0000-0000-0000-000000000000}" name="IPC">
         <FILE id="Ipc001" name="IpcProtocol.h" compile="0" resource="0" file="Source/IPC/IpcProtocol.h"/>

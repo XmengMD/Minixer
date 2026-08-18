@@ -2,6 +2,7 @@
 #include "Plugin/PluginRegistry.h"
 #include "Plugin/PluginArchitecture.h"
 #include "Plugin/PluginBridgeNode.h"
+#include "Plugin/PluginSelectorComponent.h"
 #include "Settings/AppSettings.h"
 
 namespace minixer
@@ -1196,8 +1197,7 @@ void MainComponent::moveSlotContent (int fromIndex, int toIndex)
 //==============================================================================
 void MainComponent::showPluginSelectionMenu (int slotIndex)
 {
-    auto& knownList = PluginRegistry::getInstance().getKnownPluginList();
-    auto types = knownList.getTypes();
+    auto types = PluginRegistry::getInstance().getKnownPluginList().getTypes();
 
     if (types.isEmpty())
     {
@@ -1207,22 +1207,25 @@ void MainComponent::showPluginSelectionMenu (int slotIndex)
         return;
     }
 
-    juce::PopupMenu menu;
-    juce::KnownPluginList::addToMenu (menu, types,
-                                      juce::KnownPluginList::sortAlphabetically,
-                                      slotStates[slotIndex].pluginIdentifier);
+    auto* selector = new PluginSelectorComponent (
+        std::move (types),
+        slotStates[slotIndex].pluginIdentifier,
+        [this, slotIndex] (const juce::PluginDescription* desc)
+        {
+            if (desc != nullptr)
+                loadPluginIntoSlot (slotIndex, *desc);
+        },
+        &mixerLookAndFeel);
 
-    menu.showMenuAsync (juce::PopupMenu::Options(),
-                        [this, slotIndex, types] (int result)
-    {
-        if (result == 0)
-            return;
-
-        auto index = juce::KnownPluginList::getIndexChosenByMenu (types, result);
-
-        if (juce::isPositiveAndBelow (index, types.size()))
-            loadPluginIntoSlot (slotIndex, types[index]);
-    });
+    juce::DialogWindow::LaunchOptions opts;
+    opts.dialogTitle = TRANS ("Select Plugin");
+    opts.content.setOwned (selector);
+    opts.componentToCentreAround = this;
+    opts.dialogBackgroundColour = MixerLookAndFeel::getBackgroundColour();
+    opts.escapeKeyTriggersCloseButton = true;
+    opts.useNativeTitleBar = true;
+    opts.resizable = true;
+    opts.launchAsync();
 }
 
 //==============================================================================

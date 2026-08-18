@@ -42,13 +42,26 @@ Minixer 常驻于系统后台，可将硬件麦克风输入经 VST3 插件链（
 ### 3. 生成并编译
 
 ```powershell
-# x64（主程序 + 64 位 PluginHost）
+# 如果 JUCE / ASIO SDK 不在默认搜索路径，配置时通过 -D 传入：
+# cmake -B build -S . -A x64 -T host=x64 `
+#       -D JUCE_DIR="D:\ruanjian\JUCE" `
+#       -D ASIO_DIR="D:\CodePacks\Store\SDK\asiosdk_2.3.3_2019-06-14"
+
+# x64 Debug（主程序 + 64 位 PluginHost）
 cmake -B build -S . -A x64 -T host=x64
 cmake --build build --config Debug
 
-# 32 位 PluginHost（用于加载 32-bit VST3 插件）
+# x64 Release（推荐发布时使用）
+cmake -B build -S . -A x64 -T host=x64
+cmake --build build --config Release
+
+# 32 位 PluginHost Debug（用于加载 32-bit VST3 插件）
 cmake -B build-x86 -S . -A Win32 -T host=x64
 cmake --build build-x86 --target PluginHost --config Debug
+
+# 32 位 PluginHost Release
+cmake -B build-x86 -S . -A Win32 -T host=x64
+cmake --build build-x86 --target PluginHost --config Release
 ```
 
 构建完成后：
@@ -56,6 +69,9 @@ cmake --build build-x86 --target PluginHost --config Debug
 - `build/Minixer_artefacts/Debug/Minixer.exe`
 - `build/Minixer_artefacts/Debug/PluginHost64.exe`
 - `build-x86/PluginHost_artefacts/Debug/PluginHost32.exe`
+- `build/Minixer_artefacts/Release/Minixer.exe`
+- `build/Minixer_artefacts/Release/PluginHost64.exe`
+- `build-x86/PluginHost_artefacts/Release/PluginHost32.exe`
 
 CMake 构建脚本会在 PluginHost 编译完成后自动将其复制到 Minixer 输出目录。
 
@@ -100,6 +116,29 @@ Minixer/
 - 推荐使用 CMake 构建。Projucer 工作流仍可通过 `Minixer.jucer` 使用，但其导出的 Visual Studio 工程可能包含本机绝对路径，换机或上传前需重新配置Minixer.jucer中的JUCE模块包含路径。每当CMakeLists.txt更新时，需同步更新Minixer.jucer中的JUCE模块包含路径。
 - 项目仅支持 VST3 插件，不支持 VST2 / AAX。
 - 运行时需要 `PluginHost64.exe` 与 `PluginHost32.exe` 与主程序位于同一目录，用于加载 64-bit / 32-bit 插件的沙盒子进程。
+
+## 数据与配置目录
+
+Minixer 的所有用户数据默认存放在 Windows 用户应用数据目录下：
+
+```
+%AppData%\Minixer\
+```
+
+完整路径示例：`C:\Users\<用户名>\AppData\Roaming\Minixer\`
+
+该目录下主要包含：
+
+| 文件/目录 | 说明 |
+|---|---|
+| `Minixer.settings` | 应用偏好设置（窗口状态、快捷键、搜索范围等） |
+| `Presets/` | 用户保存的预设文件（`.minixer`） |
+| `PluginList.xml` | 扫描到的 VST3 插件列表 |
+| `PluginBlacklist.json` | 扫描/加载时崩溃或超时的插件黑名单 |
+| `DeadMansPedal.txt` | 扫描崩溃保护文件 |
+| `AudioDeviceState.xml` | 音频设备状态 |
+
+> **版本兼容性提示**：当升级/降级大版本或遇到偏好设置、预设、插件列表异常时，建议先关闭 Minixer，然后备份并删除 `%AppData%\Minixer` 目录，再重新启动软件。程序会自动重建默认配置，随后可重新扫描插件并导入需要的预设。
 
 ## 开源协议
 
@@ -153,13 +192,26 @@ Use any of the following methods:
 ### 3. Generate and build
 
 ```powershell
-# x64 (main app + 64-bit PluginHost)
+# If JUCE / ASIO SDK are not in the default search paths, pass them via -D:
+# cmake -B build -S . -A x64 -T host=x64 `
+#       -D JUCE_DIR="D:\ruanjian\JUCE" `
+#       -D ASIO_DIR="D:\CodePacks\Store\SDK\asiosdk_2.3.3_2019-06-14"
+
+# x64 Debug (main app + 64-bit PluginHost)
 cmake -B build -S . -A x64 -T host=x64
 cmake --build build --config Debug
 
-# 32-bit PluginHost (For loading 32-bit VST3 plugins)
+# x64 Release (recommended for distribution)
+cmake -B build -S . -A x64 -T host=x64
+cmake --build build --config Release
+
+# 32-bit PluginHost Debug (for loading 32-bit VST3 plugins)
 cmake -B build-x86 -S . -A Win32 -T host=x64
 cmake --build build-x86 --target PluginHost --config Debug
+
+# 32-bit PluginHost Release
+cmake -B build-x86 -S . -A Win32 -T host=x64
+cmake --build build-x86 --target PluginHost --config Release
 ```
 
 After building:
@@ -167,6 +219,9 @@ After building:
 - `build/Minixer_artefacts/Debug/Minixer.exe`
 - `build/Minixer_artefacts/Debug/PluginHost64.exe`
 - `build-x86/PluginHost_artefacts/Debug/PluginHost32.exe`
+- `build/Minixer_artefacts/Release/Minixer.exe`
+- `build/Minixer_artefacts/Release/PluginHost64.exe`
+- `build-x86/PluginHost_artefacts/Release/PluginHost32.exe`
 
 The CMake build script automatically copies PluginHost to the Minixer output directory after compilation.
 
@@ -211,6 +266,29 @@ Minixer/
 - CMake is the recommended build system. The Projucer workflow is still available via `Minixer.jucer`, but may contain machine-specific absolute JUCE module include paths that need to be reconfigured before use on another machine. Whenever CMakeLists.txt is updated, please also update Minixer.jucer accordingly.
 - Only VST3 plugins are supported; VST2 / AAX are not supported.
 - At runtime, `PluginHost64.exe` and `PluginHost32.exe` must be in the same directory as the main executable, as they are used to sandbox 64-bit and 32-bit plugins.
+
+## Data and Configuration Directory
+
+All Minixer user data is stored in the Windows user application data directory:
+
+```
+%AppData%\Minixer\
+```
+
+Full example path: `C:\Users\<Username>\AppData\Roaming\Minixer\`
+
+The directory contains:
+
+| File / Directory | Description |
+|---|---|
+| `Minixer.settings` | Application preferences (window state, shortcuts, search mode, etc.) |
+| `Presets/` | User-saved preset files (`.minixer`) |
+| `PluginList.xml` | Scanned VST3 plugin list |
+| `PluginBlacklist.json` | Blacklist of plugins that crashed or timed out during scan/load |
+| `DeadMansPedal.txt` | Scan crash protection file |
+| `AudioDeviceState.xml` | Audio device state |
+
+> **Version compatibility note**: When upgrading/downgrading between major versions or if you encounter corruption in preferences, presets, or the plugin list, close Minixer, back up and delete the `%AppData%\Minixer` directory, then restart the application. It will recreate the default configuration; you can then rescan plugins and re-import any presets you need.
 
 ## License
 
