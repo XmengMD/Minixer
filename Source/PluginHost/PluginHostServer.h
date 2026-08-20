@@ -37,6 +37,7 @@ public:
     /** 连接控制通道与共享内存。 */
     bool connect (const juce::String& ipcKey,
                   const juce::String& pluginPath,
+                  const juce::String& pluginDescriptionXmlB64,
                   uint32_t maxFrames,
                   uint32_t numInputs,
                   uint32_t numOutputs);
@@ -61,6 +62,7 @@ private:
     //==============================================================================
     juce::String ipcKey;
     juce::String pluginPath;
+    juce::PluginDescription pluginDescription;
     uint32_t maxFramesPerBlock = 512;
     uint32_t numInputChannels = 2;
     uint32_t numOutputChannels = 2;

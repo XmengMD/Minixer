@@ -25,7 +25,163 @@ namespace
             return a.name.compareNatural (b.name);
         }
     };
+
+    constexpr int columnCount             = 3;
+    constexpr int nameColumnIndex         = 0;
+    constexpr int manufacturerColumnIndex = 1;
+    constexpr int categoryColumnIndex     = 2;
+    constexpr int defaultNameColumnWidth         = 280;
+    constexpr int defaultManufacturerColumnWidth = 180;
+    constexpr int defaultCategoryColumnWidth     = 140;
+    constexpr int columnPadding                  = 8;
+    constexpr int minColumnWidth                 = 40;
+    constexpr int maxColumnWidth                 = 800;
+    constexpr int headerHeight                   = 24;
+    constexpr int dividerHitRadius               = 4;
+
+    juce::Array<int> makeDefaultColumnWidths()
+    {
+        return { defaultNameColumnWidth, defaultManufacturerColumnWidth, defaultCategoryColumnWidth };
+    }
+
+    int sumColumnWidths (const juce::Array<int>& widths)
+    {
+        int total = 0;
+        for (auto w : widths)
+            total += w;
+        return total;
+    }
 }
+
+//==============================================================================
+/** 可拖拽调整列宽的表头组件。 */
+class PluginSelectorHeaderComponent  : public juce::Component
+{
+    public:
+        using OnWidthsChanged = std::function<void()>;
+        using OnDragFinished  = std::function<void()>;
+
+        PluginSelectorHeaderComponent (juce::Array<int>& widthsToControl,
+                                       OnWidthsChanged onChanged,
+                                       OnDragFinished onFinished)
+            : columnWidths (widthsToControl),
+              onWidthsChanged (std::move (onChanged)),
+              onDragFinished (std::move (onFinished))
+        {
+            setInterceptsMouseClicks (true, true);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (MixerLookAndFeel::getSurfaceColour().brighter (0.05f));
+
+            g.setColour (MixerLookAndFeel::getBorderColour());
+            g.drawHorizontalLine (getHeight() - 1, 0.0f, static_cast<float> (getWidth()));
+
+            g.setColour (MixerLookAndFeel::getTextColour());
+            g.setFont (juce::Font (juce::FontOptions (static_cast<float> (getHeight()) * 0.55f)).boldened());
+
+            const juce::String labels[columnCount] = { TRANS ("Name"), TRANS ("Manufacturer"), TRANS ("Category") };
+            int x = 0;
+
+            for (int i = 0; i < columnCount; ++i)
+            {
+                auto bounds = juce::Rectangle<int> (x + columnPadding, 0,
+                                                    columnWidths.getReference (i) - columnPadding * 2, getHeight());
+                g.drawText (labels[i], bounds, juce::Justification::centredLeft, true);
+
+                if (i < columnCount - 1)
+                {
+                    auto dividerX = x + columnWidths.getReference (i);
+                    g.setColour (MixerLookAndFeel::getBorderColour());
+                    g.drawVerticalLine (dividerX, 0.0f, static_cast<float> (getHeight()));
+                    g.setColour (MixerLookAndFeel::getTextColour());
+                }
+
+                x += columnWidths.getReference (i);
+            }
+        }
+
+        void mouseMove (const juce::MouseEvent& e) override
+        {
+            updateMouseCursor (e.position.x);
+        }
+
+        void mouseExit (const juce::MouseEvent&) override
+        {
+            setMouseCursor (juce::MouseCursor::NormalCursor);
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            draggingDivider = findDividerAt (e.position.x);
+
+            if (draggingDivider >= 0)
+            {
+                dragStartX = e.position.x;
+                dragStartWidths = columnWidths;
+            }
+        }
+
+        void mouseDrag (const juce::MouseEvent& e) override
+        {
+            if (draggingDivider < 0)
+                return;
+
+            auto delta = static_cast<int> (e.position.x - dragStartX);
+
+            auto newLeft  = juce::jlimit (minColumnWidth, maxColumnWidth, dragStartWidths[draggingDivider]     + delta);
+            auto newRight = juce::jlimit (minColumnWidth, maxColumnWidth, dragStartWidths[draggingDivider + 1] - delta);
+
+            columnWidths.getReference (draggingDivider)     = newLeft;
+            columnWidths.getReference (draggingDivider + 1) = newRight;
+
+            if (onWidthsChanged != nullptr)
+                onWidthsChanged();
+
+            repaint();
+        }
+
+        void mouseUp (const juce::MouseEvent&) override
+        {
+            if (draggingDivider >= 0 && onDragFinished != nullptr)
+                onDragFinished();
+
+            draggingDivider = -1;
+            setMouseCursor (juce::MouseCursor::NormalCursor);
+        }
+
+    private:
+        int findDividerAt (float x) const
+        {
+            int pos = 0;
+
+            for (int i = 0; i < columnCount - 1; ++i)
+            {
+                pos += columnWidths.getReference (i);
+
+                if (std::abs (x - pos) <= dividerHitRadius)
+                    return i;
+            }
+
+            return -1;
+        }
+
+        void updateMouseCursor (float x)
+        {
+            setMouseCursor (findDividerAt (x) >= 0
+                                ? juce::MouseCursor (juce::MouseCursor::LeftRightResizeCursor)
+                                : juce::MouseCursor (juce::MouseCursor::NormalCursor));
+        }
+
+        juce::Array<int>& columnWidths;
+        OnWidthsChanged onWidthsChanged;
+        OnDragFinished  onDragFinished;
+
+        int draggingDivider = -1;
+        float dragStartX = 0.0f;
+        juce::Array<int> dragStartWidths;
+    };
 
 //==============================================================================
 PluginSelectorComponent::PluginSelectorComponent (juce::Array<juce::PluginDescription> pluginTypes,
@@ -34,7 +190,8 @@ PluginSelectorComponent::PluginSelectorComponent (juce::Array<juce::PluginDescri
                                                   juce::LookAndFeel* lookAndFeelToUse)
     : allTypes (std::move (pluginTypes)),
       currentIdentifier (currentPluginIdentifier),
-      onResult (std::move (callback))
+      onResult (std::move (callback)),
+      columnWidths (AppSettings::getInstance().getPluginSelectorColumnWidths())
 {
     if (lookAndFeelToUse != nullptr)
         setLookAndFeel (lookAndFeelToUse);
@@ -47,6 +204,13 @@ PluginSelectorComponent::PluginSelectorComponent (juce::Array<juce::PluginDescri
     addAndMakeVisible (clearSearchButton);
     addAndMakeVisible (listBox);
     addChildComponent (emptyLabel);
+
+    auto header = std::make_unique<PluginSelectorHeaderComponent> (
+        columnWidths,
+        [this] { onColumnWidthsChanged(); },
+        [this] { AppSettings::getInstance().setPluginSelectorColumnWidths (columnWidths); });
+    header->setSize (sumColumnWidths (columnWidths), headerHeight);
+    listBox.setHeaderComponent (std::move (header));
 
     searchField = static_cast<SearchField> (
         juce::jlimit (0, 3, AppSettings::getInstance().getPluginSelectorSearchMode()));
@@ -76,6 +240,7 @@ PluginSelectorComponent::PluginSelectorComponent (juce::Array<juce::PluginDescri
 
     listBox.setRowHeight (28);
     listBox.setMultipleSelectionEnabled (false);
+    listBox.setMinimumContentWidth (sumColumnWidths (columnWidths));
     listBox.setColour (juce::ListBox::backgroundColourId, MixerLookAndFeel::getSurfaceColour());
     listBox.setColour (juce::ListBox::outlineColourId,   MixerLookAndFeel::getBorderColour());
     listBox.setColour (juce::ListBox::textColourId,      MixerLookAndFeel::getTextColour());
@@ -94,19 +259,26 @@ PluginSelectorComponent::PluginSelectorComponent (juce::Array<juce::PluginDescri
 void PluginSelectorComponent::resized()
 {
     auto bounds = getLocalBounds().reduced (8);
-    auto header = bounds.removeFromTop (32);
+    auto searchBar = bounds.removeFromTop (32);
 
-    clearSearchButton.setBounds (header.removeFromRight (32)
-                                        .withHeight (24)
-                                        .withY (header.getCentreY() - 12));
-    criteriaBox.setBounds (header.removeFromRight (100)
-                                  .withHeight (24)
-                                  .withY (header.getCentreY() - 12)
-                                  .reduced (4, 0));
-    searchEditor.setBounds (header.reduced (0, 4));
+    clearSearchButton.setBounds (searchBar.removeFromRight (32)
+                                          .withHeight (24)
+                                          .withY (searchBar.getCentreY() - 12));
+    criteriaBox.setBounds (searchBar.removeFromRight (100)
+                                    .withHeight (24)
+                                    .withY (searchBar.getCentreY() - 12)
+                                    .reduced (4, 0));
+    searchEditor.setBounds (searchBar.reduced (0, 4));
 
-    listBox.setBounds (bounds.withTrimmedTop (8));
+    bounds.removeFromTop (4);
+    listBox.setBounds (bounds);
     emptyLabel.setBounds (listBox.getBounds());
+}
+
+void PluginSelectorComponent::onColumnWidthsChanged()
+{
+    listBox.setMinimumContentWidth (sumColumnWidths (columnWidths));
+    listBox.repaint();
 }
 
 void PluginSelectorComponent::visibilityChanged()
@@ -146,13 +318,27 @@ int PluginSelectorComponent::getNumRows()
     return filteredTypes.size();
 }
 
+const juce::PluginDescription* PluginSelectorComponent::getPluginDescriptionForRow (int row) const
+{
+    if (! juce::isPositiveAndBelow (row, filteredTypes.size()))
+        return nullptr;
+
+    const auto index = filteredTypes[row];
+    if (! juce::isPositiveAndBelow (index, allTypes.size()))
+        return nullptr;
+
+    return &allTypes.getReference (index);
+}
+
+//==============================================================================
 void PluginSelectorComponent::paintListBoxItem (int rowNumber, juce::Graphics& g,
                                                 int width, int height, bool rowIsSelected)
 {
-    if (! juce::isPositiveAndBelow (rowNumber, filteredTypes.size()))
+    const auto* descPtr = getPluginDescriptionForRow (rowNumber);
+    if (descPtr == nullptr)
         return;
 
-    const auto& desc = *filteredTypes[rowNumber];
+    const auto& desc = *descPtr;
     const bool isCurrent = desc.createIdentifierString() == currentIdentifier;
 
     const auto backgroundColour = MixerLookAndFeel::getSurfaceColour();
@@ -165,22 +351,38 @@ void PluginSelectorComponent::paintListBoxItem (int rowNumber, juce::Graphics& g
         textColour = MixerLookAndFeel::getAccentColour();
 
     g.setColour (textColour);
-    g.setFont (juce::Font (juce::FontOptions ((float) height * 0.6f)));
+    g.setFont (juce::Font (juce::FontOptions ((float) height * 0.55f)));
 
-    const auto textBounds = juce::Rectangle<int> (8, 0, width - 16, height);
-    g.drawText (desc.name, textBounds, juce::Justification::centredLeft, true);
+    auto drawColumn = [&g, height] (const juce::String& text, int x, int w)
+    {
+        auto bounds = juce::Rectangle<int> (x + columnPadding, 0, juce::jmax (0, w - columnPadding * 2), height);
+        g.drawText (text, bounds, juce::Justification::centredLeft, true);
+    };
+
+    int x = 0;
+    drawColumn (desc.name,            x, columnWidths[nameColumnIndex]);         x += columnWidths[nameColumnIndex];
+    drawColumn (desc.manufacturerName, x, columnWidths[manufacturerColumnIndex]); x += columnWidths[manufacturerColumnIndex];
+    drawColumn (desc.category,         x, columnWidths[categoryColumnIndex]);
+
+    // 列分隔线
+    g.setColour (MixerLookAndFeel::getBorderColour());
+    x = 0;
+    g.drawVerticalLine (x += columnWidths[nameColumnIndex],         0.0f, static_cast<float> (height));
+    g.drawVerticalLine (x += columnWidths[manufacturerColumnIndex], 0.0f, static_cast<float> (height));
+
+    juce::ignoreUnused (width);
 }
 
 void PluginSelectorComponent::listBoxItemDoubleClicked (int row, const juce::MouseEvent&)
 {
-    if (juce::isPositiveAndBelow (row, filteredTypes.size()))
-        commitSelection (filteredTypes[row]);
+    if (auto* desc = getPluginDescriptionForRow (row))
+        commitSelection (*desc);
 }
 
 void PluginSelectorComponent::returnKeyPressed (int lastRowSelected)
 {
-    if (juce::isPositiveAndBelow (lastRowSelected, filteredTypes.size()))
-        commitSelection (filteredTypes[lastRowSelected]);
+    if (auto* desc = getPluginDescriptionForRow (lastRowSelected))
+        commitSelection (*desc);
 }
 
 //==============================================================================
@@ -211,10 +413,10 @@ void PluginSelectorComponent::applyFilter()
         return false;
     };
 
-    for (const auto& desc : allTypes)
+    for (int i = 0; i < allTypes.size(); ++i)
     {
-        if (matchesQuery (desc))
-            filteredTypes.add (&desc);
+        if (matchesQuery (allTypes.getReference (i)))
+            filteredTypes.add (i);
     }
 
     listBox.updateContent();
@@ -237,7 +439,7 @@ void PluginSelectorComponent::applyFilter()
     }
 }
 
-void PluginSelectorComponent::commitSelection (const juce::PluginDescription* desc)
+void PluginSelectorComponent::commitSelection (const juce::PluginDescription& desc)
 {
     if (hasFinished)
         return;
@@ -260,8 +462,13 @@ int PluginSelectorComponent::findRowForCurrentPlugin() const
         return -1;
 
     for (int i = 0; i < filteredTypes.size(); ++i)
-        if (filteredTypes[i]->createIdentifierString() == currentIdentifier)
-            return i;
+    {
+        if (auto* desc = getPluginDescriptionForRow (i))
+        {
+            if (desc->createIdentifierString() == currentIdentifier)
+                return i;
+        }
+    }
 
     return -1;
 }

@@ -192,6 +192,57 @@ void AppSettings::setPluginSelectorSearchMode (int mode)
 }
 
 //==============================================================================
+juce::Array<int> AppSettings::getPluginSelectorColumnWidths() const
+{
+    juce::Array<int> defaults { 280, 180, 140 };
+
+    if (auto* user = props->getUserSettings())
+    {
+        auto str = user->getValue ("pluginSelectorColumnWidths");
+
+        if (str.isNotEmpty())
+        {
+            auto parts = juce::StringArray::fromTokens (str, ",", {});
+
+            if (parts.size() == 3)
+            {
+                juce::Array<int> result;
+
+                for (auto& part : parts)
+                    result.add (juce::jlimit (40, 800, part.getIntValue()));
+
+                if (result.size() == 3)
+                    return result;
+            }
+        }
+    }
+
+    return defaults;
+}
+
+//==============================================================================
+void AppSettings::setPluginSelectorColumnWidths (const juce::Array<int>& widths)
+{
+    if (widths.size() != 3)
+        return;
+
+    juce::String str;
+
+    for (int i = 0; i < 3; ++i)
+    {
+        if (i > 0)
+            str += ",";
+
+        str += juce::String (juce::jlimit (40, 800, widths[i]));
+    }
+
+    if (auto* user = props->getUserSettings())
+        user->setValue ("pluginSelectorColumnWidths", str);
+
+    save();
+}
+
+//==============================================================================
 void AppSettings::applyLaunchOnStartup()
 {
    #if JUCE_WINDOWS

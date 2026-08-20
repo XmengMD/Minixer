@@ -24,6 +24,7 @@ struct PluginHostLaunchOptions
     juce::String ipcKey;
     juce::String mode;          // "scan" 或 "runtime"
     juce::String logPath;
+    juce::String pluginDescriptionXmlB64; // 运行期模式需要，用于 shell 插件选择正确的子插件
     uint32_t     maxFramesPerBlock = 4096;
     PluginArchitecture architecture = PluginArchitecture::x64;
 };

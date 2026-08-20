@@ -17,7 +17,7 @@ class PluginSelectorComponent  : public juce::Component,
 {
 public:
     //==============================================================================
-    using ResultCallback = std::function<void (const juce::PluginDescription*)>;
+    using ResultCallback = std::function<void (juce::PluginDescription)>;
 
     enum class SearchField
     {
@@ -59,11 +59,16 @@ private:
 
     //==============================================================================
     void applyFilter();
-    void commitSelection (const juce::PluginDescription* desc);
+    void commitSelection (const juce::PluginDescription& desc);
     int findRowForCurrentPlugin() const;
     void closeDialog();
 
+    const juce::PluginDescription* getPluginDescriptionForRow (int row) const;
+    void onColumnWidthsChanged();
+
     //==============================================================================
+    juce::Array<int> columnWidths;
+
     juce::TextEditor searchEditor;
     juce::ComboBox criteriaBox { "SearchCriteria" };
     juce::TextButton clearSearchButton { "AC" };  // 清空搜索
@@ -71,7 +76,7 @@ private:
     juce::Label emptyLabel;
 
     juce::Array<juce::PluginDescription> allTypes;
-    juce::Array<const juce::PluginDescription*> filteredTypes;
+    juce::Array<int> filteredTypes;
     juce::String currentIdentifier;
     ResultCallback onResult;
     SearchField searchField = SearchField::name;

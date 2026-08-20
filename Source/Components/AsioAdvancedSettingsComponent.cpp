@@ -10,21 +10,31 @@ AsioAdvancedSettingsComponent::AsioAdvancedSettingsComponent (juce::AudioDeviceM
     : deviceManager (manager),
       onChannelsChanged (std::move (onChannelsChangedCallback))
 {
-    setSize (360, 320);
+    setSize (360, 400);
 
     setupLabel (deviceNameLabel, {});
     deviceNameLabel.setJustificationType (juce::Justification::centred);
     deviceNameLabel.setFont (juce::Font (juce::FontOptions (13.0f)).boldened());
 
     setupSectionLabel (inputSectionLabel,  TRANS ("Input Channels"));
-    setupLabel (inputLeftLabel,           TRANS ("Input L"));
-    setupLabel (inputRightLabel,          TRANS ("Input R"));
+    setupLabel (inputModeLabel,           TRANS ("Mode"));
+    setupComboBox (inputModeComboBox);
+    inputModeComboBox.addItem (TRANS ("Mono"),   1);
+    inputModeComboBox.addItem (TRANS ("Stereo"), 2);
+
+    setupLabel (inputLeftLabel,  TRANS ("Input L"));
+    setupLabel (inputRightLabel, TRANS ("Input R"));
     setupComboBox (inputLeftComboBox);
     setupComboBox (inputRightComboBox);
 
     setupSectionLabel (outputSectionLabel, TRANS ("Output Channels"));
-    setupLabel (outputLeftLabel,           TRANS ("Output L"));
-    setupLabel (outputRightLabel,          TRANS ("Output R"));
+    setupLabel (outputModeLabel,           TRANS ("Mode"));
+    setupComboBox (outputModeComboBox);
+    outputModeComboBox.addItem (TRANS ("Mono"),   1);
+    outputModeComboBox.addItem (TRANS ("Stereo"), 2);
+
+    setupLabel (outputLeftLabel,  TRANS ("Output L"));
+    setupLabel (outputRightLabel, TRANS ("Output R"));
     setupComboBox (outputLeftComboBox);
     setupComboBox (outputRightComboBox);
 
@@ -64,9 +74,11 @@ void AsioAdvancedSettingsComponent::resized()
 
     layoutFullRow (deviceNameLabel);
     layoutFullRow (inputSectionLabel);
+    layoutRow (inputModeLabel,  inputModeComboBox);
     layoutRow (inputLeftLabel,  inputLeftComboBox);
     layoutRow (inputRightLabel, inputRightComboBox);
     layoutFullRow (outputSectionLabel);
+    layoutRow (outputModeLabel,  outputModeComboBox);
     layoutRow (outputLeftLabel,  outputLeftComboBox);
     layoutRow (outputRightLabel, outputRightComboBox);
 
@@ -105,6 +117,46 @@ void AsioAdvancedSettingsComponent::buttonClicked (juce::Button* button)
 }
 
 //==============================================================================
+void AsioAdvancedSettingsComponent::comboBoxChanged (juce::ComboBox* comboBox)
+{
+    if (updatingUI)
+        return;
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return;
+
+    if (comboBox == &inputModeComboBox)
+    {
+        handleModeChanged (inputModeComboBox,
+                           inputLeftComboBox,
+                           inputRightComboBox,
+                           static_cast<int> (device->getInputChannelNames().size()));
+    }
+    else if (comboBox == &outputModeComboBox)
+    {
+        handleModeChanged (outputModeComboBox,
+                           outputLeftComboBox,
+                           outputRightComboBox,
+                           static_cast<int> (device->getOutputChannelNames().size()));
+    }
+    else if (comboBox == &inputLeftComboBox || comboBox == &inputRightComboBox)
+    {
+        if (inputModeComboBox.getSelectedId() == 2)
+            ensureStereoChannelsDistinct (inputLeftComboBox,
+                                          inputRightComboBox,
+                                          static_cast<int> (device->getInputChannelNames().size()));
+    }
+    else if (comboBox == &outputLeftComboBox || comboBox == &outputRightComboBox)
+    {
+        if (outputModeComboBox.getSelectedId() == 2)
+            ensureStereoChannelsDistinct (outputLeftComboBox,
+                                          outputRightComboBox,
+                                          static_cast<int> (device->getOutputChannelNames().size()));
+    }
+}
+
+//==============================================================================
 void AsioAdvancedSettingsComponent::setupLabel (juce::Label& label, const juce::String& text)
 {
     label.setText (text, juce::dontSendNotification);
@@ -128,6 +180,7 @@ void AsioAdvancedSettingsComponent::setupSectionLabel (juce::Label& label, const
 void AsioAdvancedSettingsComponent::setupComboBox (juce::ComboBox& comboBox)
 {
     comboBox.setLookAndFeel (&getLookAndFeel());
+    comboBox.addListener (this);
     addAndMakeVisible (comboBox);
 }
 
@@ -170,9 +223,7 @@ void AsioAdvancedSettingsComponent::refreshChannelLists()
     populate (outputLeftComboBox, device->getOutputChannelNames());
     populate (outputRightComboBox, device->getOutputChannelNames());
 
-    // 只有一个通道时禁用右声道选择
-    inputRightComboBox.setEnabled  (device->getInputChannelNames().size()  > 1);
-    outputRightComboBox.setEnabled (device->getOutputChannelNames().size() > 1);
+    updateModeVisibility();
 }
 
 //==============================================================================
@@ -213,16 +264,26 @@ void AsioAdvancedSettingsComponent::updateUIFromSetup()
         return { left, right };
     };
 
-    auto inputChannels  = device->getInputChannelNames().size();
-    auto outputChannels = device->getOutputChannelNames().size();
+    auto inputChannelCount  = static_cast<int> (device->getInputChannelNames().size());
+    auto outputChannelCount = static_cast<int> (device->getOutputChannelNames().size());
 
-    auto [inL, inR]   = autoSelect (setup.inputChannels,  inputChannels);
-    auto [outL, outR] = autoSelect (setup.outputChannels, outputChannels);
+    auto [inL, inR]   = autoSelect (setup.inputChannels,  inputChannelCount);
+    auto [outL, outR] = autoSelect (setup.outputChannels, outputChannelCount);
+
+    // 根据当前实际启用的通道数推断 Mono/Stereo 模式。
+    // 单声道设备或只启用 1 个通道时显示为 Mono 模式。
+    bool inputStereo  = (setup.inputChannels.countNumberOfSetBits()  >= 2) && (inputChannelCount  > 1);
+    bool outputStereo = (setup.outputChannels.countNumberOfSetBits() >= 2) && (outputChannelCount > 1);
+
+    inputModeComboBox.setSelectedId  (inputStereo  ? 2 : 1, juce::dontSendNotification);
+    outputModeComboBox.setSelectedId (outputStereo ? 2 : 1, juce::dontSendNotification);
 
     inputLeftComboBox.setSelectedId   (inL  >= 0 ? inL  + 1 : 0, juce::dontSendNotification);
     inputRightComboBox.setSelectedId  (inR  >= 0 ? inR  + 1 : 0, juce::dontSendNotification);
     outputLeftComboBox.setSelectedId  (outL >= 0 ? outL + 1 : 0, juce::dontSendNotification);
     outputRightComboBox.setSelectedId (outR >= 0 ? outR + 1 : 0, juce::dontSendNotification);
+
+    updateModeVisibility();
 
     updatingUI = false;
 }
@@ -234,7 +295,18 @@ void AsioAdvancedSettingsComponent::resetUIToDefaults()
     if (device == nullptr)
         return;
 
-    auto selectDefault = [] (juce::ComboBox& leftBox, juce::ComboBox& rightBox, int maxChannels)
+    auto inputChannelCount  = static_cast<int> (device->getInputChannelNames().size());
+    auto outputChannelCount = static_cast<int> (device->getOutputChannelNames().size());
+
+    // Reset 默认恢复到 Stereo（设备支持时），否则 Mono
+    bool inputStereo  = inputChannelCount  > 1;
+    bool outputStereo = outputChannelCount > 1;
+
+    inputModeComboBox.setSelectedId  (inputStereo  ? 2 : 1, juce::dontSendNotification);
+    outputModeComboBox.setSelectedId (outputStereo ? 2 : 1, juce::dontSendNotification);
+
+    auto selectDefault = [] (juce::ComboBox& leftBox, juce::ComboBox& rightBox,
+                             bool isStereo, int maxChannels)
     {
         if (maxChannels <= 0)
         {
@@ -245,14 +317,16 @@ void AsioAdvancedSettingsComponent::resetUIToDefaults()
 
         leftBox.setSelectedId (1, juce::dontSendNotification);
 
-        if (rightBox.isEnabled() && maxChannels > 1)
+        if (isStereo && maxChannels > 1)
             rightBox.setSelectedId (2, juce::dontSendNotification);
         else
             rightBox.setSelectedId (0, juce::dontSendNotification);
     };
 
-    selectDefault (inputLeftComboBox,  inputRightComboBox,  device->getInputChannelNames().size());
-    selectDefault (outputLeftComboBox, outputRightComboBox, device->getOutputChannelNames().size());
+    selectDefault (inputLeftComboBox,  inputRightComboBox,  inputStereo,  inputChannelCount);
+    selectDefault (outputLeftComboBox, outputRightComboBox, outputStereo, outputChannelCount);
+
+    updateModeVisibility();
 }
 
 //==============================================================================
@@ -264,7 +338,7 @@ void AsioAdvancedSettingsComponent::applyChannelSetup()
         return;
 
     auto apply = [] (juce::BigInteger& channels, juce::ComboBox& leftBox,
-                     juce::ComboBox& rightBox, int maxChannels)
+                     juce::ComboBox& rightBox, bool isStereo, int maxChannels)
     {
         channels.clear();
 
@@ -272,19 +346,27 @@ void AsioAdvancedSettingsComponent::applyChannelSetup()
             return;
 
         auto leftIdx = leftBox.getSelectedId() - 1;
-        if (leftIdx >= 0 && leftIdx < maxChannels)
+        if (isValidChannelIndex (leftIdx, maxChannels))
             channels.setBit (leftIdx);
 
-        if (rightBox.isEnabled())
+        if (isStereo)
         {
             auto rightIdx = rightBox.getSelectedId() - 1;
-            if (rightIdx >= 0 && rightIdx < maxChannels)
+
+            // 立体声模式下左右通道不能相同；若相同则自动修正到下一个可用通道
+            if (rightIdx == leftIdx)
+                rightIdx = findNextDistinctChannelIndex (leftIdx, maxChannels);
+
+            if (isValidChannelIndex (rightIdx, maxChannels))
                 channels.setBit (rightIdx);
         }
     };
 
-    apply (setup.inputChannels,  inputLeftComboBox,  inputRightComboBox,  device->getInputChannelNames().size());
-    apply (setup.outputChannels, outputLeftComboBox, outputRightComboBox, device->getOutputChannelNames().size());
+    bool inputStereo  = (inputModeComboBox.getSelectedId()  == 2);
+    bool outputStereo = (outputModeComboBox.getSelectedId() == 2);
+
+    apply (setup.inputChannels,  inputLeftComboBox,  inputRightComboBox,  inputStereo,  static_cast<int> (device->getInputChannelNames().size()));
+    apply (setup.outputChannels, outputLeftComboBox, outputRightComboBox, outputStereo, static_cast<int> (device->getOutputChannelNames().size()));
 
     // 标记通道为用户显式选择，防止 JUCE 在 setAudioDeviceSetup 内部
     // 按 "useDefault*Channels" 把位图强制重置为前 N 个通道。
@@ -299,6 +381,80 @@ void AsioAdvancedSettingsComponent::applyChannelSetup()
                                                 TRANS ("ASIO Channel Routing"),
                                                 error);
     }
+}
+
+//==============================================================================
+void AsioAdvancedSettingsComponent::updateModeVisibility()
+{
+    bool inputStereo  = (inputModeComboBox.getSelectedId()  == 2);
+    bool outputStereo = (outputModeComboBox.getSelectedId() == 2);
+
+    inputLeftLabel.setText  (inputStereo  ? TRANS ("Input L")      : TRANS ("Input Channel"),  juce::dontSendNotification);
+    outputLeftLabel.setText (outputStereo ? TRANS ("Output L")     : TRANS ("Output Channel"), juce::dontSendNotification);
+
+    inputRightLabel.setVisible  (inputStereo);
+    inputRightComboBox.setVisible (inputStereo);
+    outputRightLabel.setVisible (outputStereo);
+    outputRightComboBox.setVisible (outputStereo);
+}
+
+//==============================================================================
+void AsioAdvancedSettingsComponent::handleModeChanged (juce::ComboBox& modeComboBox,
+                                                       juce::ComboBox& leftBox,
+                                                       juce::ComboBox& rightBox,
+                                                       int maxChannels)
+{
+    bool isStereo = (modeComboBox.getSelectedId() == 2);
+
+    // 设备只有 1 个通道时不允许立体声模式
+    if (isStereo && maxChannels <= 1)
+    {
+        modeComboBox.setSelectedId (1, juce::dontSendNotification);
+        isStereo = false;
+    }
+
+    updateModeVisibility();
+
+    if (isStereo)
+        ensureStereoChannelsDistinct (leftBox, rightBox, maxChannels);
+}
+
+//==============================================================================
+void AsioAdvancedSettingsComponent::ensureStereoChannelsDistinct (juce::ComboBox& leftBox,
+                                                                  juce::ComboBox& rightBox,
+                                                                  int maxChannels)
+{
+    if (maxChannels <= 1)
+        return;
+
+    auto leftIdx  = getSelectedChannelIndex (leftBox);
+    auto rightIdx = getSelectedChannelIndex (rightBox);
+
+    if (! isValidChannelIndex (leftIdx, maxChannels))
+        leftIdx = 0;
+
+    if (rightIdx == leftIdx || ! isValidChannelIndex (rightIdx, maxChannels))
+    {
+        auto nextIdx = findNextDistinctChannelIndex (leftIdx, maxChannels);
+        rightBox.setSelectedId (isValidChannelIndex (nextIdx, maxChannels) ? nextIdx + 1 : 0,
+                                juce::dontSendNotification);
+    }
+}
+
+//==============================================================================
+int AsioAdvancedSettingsComponent::findNextDistinctChannelIndex (int leftIdx, int maxChannels)
+{
+    if (maxChannels <= 1)
+        return -1;
+
+    // 优先选择 leftIdx 的下一个通道；若越界则回绕到 0
+    auto nextIdx = (leftIdx + 1) % maxChannels;
+
+    // 如果回绕后又与 leftIdx 相同（只有 1 个通道时），返回无效值
+    if (nextIdx == leftIdx)
+        return -1;
+
+    return nextIdx;
 }
 
 //==============================================================================
@@ -326,6 +482,12 @@ int AsioAdvancedSettingsComponent::getSelectedChannelIndex (juce::ComboBox& comb
 {
     auto id = comboBox.getSelectedId();
     return id > 0 ? id - 1 : -1;
+}
+
+//==============================================================================
+bool AsioAdvancedSettingsComponent::isValidChannelIndex (int idx, int maxChannels)
+{
+    return idx >= 0 && idx < maxChannels;
 }
 
 //==============================================================================

@@ -19,24 +19,6 @@ namespace
 {
 
 //==============================================================================
-#if JUCE_WINDOWS
-bool safeFindAllTypesForFile (juce::AudioPluginFormat* format,
-                              juce::OwnedArray<juce::PluginDescription>* result,
-                              const juce::String* fileOrIdentifier)
-{
-    __try
-    {
-        format->findAllTypesForFile (*result, *fileOrIdentifier);
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
-#endif
-
-//==============================================================================
 juce::AudioChannelSet channelSetFromCount (uint32_t numChannels)
 {
     switch (numChannels)
@@ -61,10 +43,10 @@ PluginWrapper::~PluginWrapper()
 }
 
 //==============================================================================
-bool PluginWrapper::loadFromFile (const juce::File& file,
-                                  double sampleRate,
-                                  int bufferSize,
-                                  juce::String& error)
+bool PluginWrapper::loadFromDescription (const juce::PluginDescription& description,
+                                       double sampleRate,
+                                       int bufferSize,
+                                       juce::String& error)
 {
     juce::AudioPluginFormatManager formatManager;
     formatManager.addDefaultFormats();
@@ -87,27 +69,8 @@ bool PluginWrapper::loadFromFile (const juce::File& file,
         return false;
     }
 
-    juce::OwnedArray<juce::PluginDescription> descriptions;
-    const juce::String filePath = file.getFullPathName();
-
-   #if JUCE_WINDOWS
-    if (! safeFindAllTypesForFile (vst3Format, &descriptions, &filePath))
-    {
-        error = "Plugin scan raised a structured exception";
-        return false;
-    }
-   #else
-    vst3Format->findAllTypesForFile (descriptions, filePath);
-   #endif
-
-    if (descriptions.isEmpty())
-    {
-        error = "No plugin descriptions found";
-        return false;
-    }
-
     juce::String instanceError;
-    plugin = vst3Format->createInstanceFromDescription (*descriptions[0],
+    plugin = vst3Format->createInstanceFromDescription (description,
                                                          sampleRate,
                                                          bufferSize,
                                                          instanceError);
