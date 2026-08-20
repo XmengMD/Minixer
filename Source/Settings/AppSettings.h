@@ -62,6 +62,11 @@ public:
     int getPluginSelectorSearchMode() const noexcept  { return pluginSelectorSearchMode; }
     void setPluginSelectorSearchMode (int mode);
 
+    /** 返回插件选择对话框的列宽数组。
+        顺序为 [Name, Manufacturer, Category]，默认 {280, 180, 140}。 */
+    juce::Array<int> getPluginSelectorColumnWidths() const;
+    void setPluginSelectorColumnWidths (const juce::Array<int>& widths);
+
     //==============================================================================
     /** 返回应用数据目录（%AppData%/Minixer），不存在时会自动创建。 */
     juce::File getAppDataDirectory() const;

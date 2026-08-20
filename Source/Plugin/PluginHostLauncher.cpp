@@ -57,6 +57,9 @@ bool PluginHostLauncher::launch (const PluginHostLaunchOptions& options)
     if (options.logPath.isNotEmpty())
         args.add ("--log-path=" + options.logPath);
 
+    if (options.pluginDescriptionXmlB64.isNotEmpty())
+        args.add ("--plugin-desc-b64=" + options.pluginDescriptionXmlB64);
+
     exitCodeKnown = false;
     knownExitCode = 0;
 

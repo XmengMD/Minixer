@@ -82,12 +82,26 @@ PluginHostServer::~PluginHostServer() = default;
 //==============================================================================
 bool PluginHostServer::connect (const juce::String& key,
                                 const juce::String& path,
+                                const juce::String& pluginDescriptionXmlB64,
                                 uint32_t maxFrames,
                                 uint32_t numInputs,
                                 uint32_t numOutputs)
 {
     ipcKey = key;
     pluginPath = path;
+
+    if (pluginDescriptionXmlB64.isNotEmpty())
+    {
+        juce::MemoryOutputStream decoded;
+        if (juce::Base64::convertFromBase64 (decoded, pluginDescriptionXmlB64))
+        {
+            auto xmlString = decoded.getMemoryBlock().toString();
+            auto xml = juce::XmlDocument::parse (xmlString);
+
+            if (xml != nullptr)
+                pluginDescription.loadFromXml (*xml);
+        }
+    }
 
     transport = createDefaultIpcTransport();
 
@@ -203,8 +217,8 @@ bool PluginHostServer::loadPlugin()
     wrapper = std::make_unique<PluginWrapper>();
 
     juce::String error;
-    if (! wrapper->loadFromFile (juce::File (pluginPath), 48000.0,
-                                  static_cast<int> (maxFramesPerBlock), error))
+    if (! wrapper->loadFromDescription (pluginDescription, 48000.0,
+                                        static_cast<int> (maxFramesPerBlock), error))
     {
         sendError (error);
         wrapper.reset();

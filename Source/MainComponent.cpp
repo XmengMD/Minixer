@@ -180,8 +180,8 @@ MainComponent::MainComponent()
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (statusLabel);
 
-    // 单声道设备提示标签（默认隐藏）
-    monoDeviceLabel.setText (TRANS("MONO DEVICE"), juce::dontSendNotification);
+    // 单声道输入提示标签（默认隐藏）
+    monoDeviceLabel.setText (TRANS("MONO INPUT"), juce::dontSendNotification);
     monoDeviceLabel.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
     monoDeviceLabel.setColour (juce::Label::textColourId, MixerLookAndFeel::getClipColour());
     monoDeviceLabel.setJustificationType (juce::Justification::centredRight);
@@ -725,12 +725,12 @@ void MainComponent::updateMonoDeviceState()
     auto setup = audioDeviceManager.getAudioDeviceSetup();
     auto activeInputChannels = setup.inputChannels.countNumberOfSetBits();
 
-    // 当实际启用的输入通道数为 1 时视为单声道设备
+    // 当实际启用的输入通道数为 1 时视为单声道输入（包括显式配置的 Mono 模式）
     isMonoDevice = (activeInputChannels == 1);
     monoDeviceLabel.setVisible (isMonoDevice);
 
     if (isMonoDevice)
-        monoDeviceLabel.setText (TRANS ("MONO DEVICE"), juce::dontSendNotification);
+        monoDeviceLabel.setText (TRANS ("MONO INPUT"), juce::dontSendNotification);
 }
 
 //==============================================================================
@@ -1210,10 +1210,9 @@ void MainComponent::showPluginSelectionMenu (int slotIndex)
     auto* selector = new PluginSelectorComponent (
         std::move (types),
         slotStates[slotIndex].pluginIdentifier,
-        [this, slotIndex] (const juce::PluginDescription* desc)
+        [this, slotIndex] (juce::PluginDescription desc)
         {
-            if (desc != nullptr)
-                loadPluginIntoSlot (slotIndex, *desc);
+            loadPluginIntoSlot (slotIndex, desc);
         },
         &mixerLookAndFeel);
 

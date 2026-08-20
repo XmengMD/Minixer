@@ -28,11 +28,15 @@ public:
     ~PluginWrapper();
 
     //==============================================================================
-    /** 从文件加载插件并创建实例。 */
-    bool loadFromFile (const juce::File& file,
-                       double sampleRate,
-                       int bufferSize,
-                       juce::String& error);
+    /** 从完整的 PluginDescription 加载插件并创建实例。
+
+        对 Waves 等 shell 插件（一个 .vst3 文件内包含多个子插件）必须传入
+        包含 uid 的完整描述，否则只会加载该文件里的第一个插件。
+    */
+    bool loadFromDescription (const juce::PluginDescription& description,
+                              double sampleRate,
+                              int bufferSize,
+                              juce::String& error);
 
     /** 返回是否已成功加载插件。 */
     bool isLoaded() const noexcept { return plugin != nullptr; }

@@ -10,6 +10,7 @@
       --plugin-path=<absolute-path-to-vst3>
       --ipc-key=<unique-shared-memory-key>
       [--log-path=<path>]
+      [--plugin-desc-b64=<base64-encoded-plugin-description-xml>]
 
   ==============================================================================
 */
@@ -118,6 +119,7 @@ public:
         auto pluginPath = getCommandLineParameter ("plugin-path");
         auto ipcKey     = getCommandLineParameter ("ipc-key");
         auto logPath    = getCommandLineParameter ("log-path");
+        auto pluginDescB64 = getCommandLineParameter ("plugin-desc-b64");
         auto maxFramesStr = getCommandLineParameter ("max-frames", "4096");
 
        #if JUCE_WINDOWS
@@ -158,7 +160,7 @@ public:
 
         minixer::PluginHostServer server;
 
-        if (! server.connect (ipcKey, pluginPath, maxFrames, numInputs, numOutputs))
+        if (! server.connect (ipcKey, pluginPath, pluginDescB64, maxFrames, numInputs, numOutputs))
         {
             juce::Logger::writeToLog ("Failed to connect IPC");
             setApplicationReturnValue (1);

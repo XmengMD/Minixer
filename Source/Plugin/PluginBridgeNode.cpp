@@ -82,6 +82,9 @@ bool PluginBridgeNode::initialize (double sampleRate, int bufferSize, juce::Stri
     options.architecture     = architecture;
     options.maxFramesPerBlock = static_cast<uint32_t> (bufferSize);
 
+    if (auto xml = pluginDescription.createXml())
+        options.pluginDescriptionXmlB64 = juce::Base64::toBase64 (xml->toString ());
+
     if (! launcher->launch (options))
     {
         errorMessage = launcher->getLastError();

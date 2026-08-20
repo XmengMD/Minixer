@@ -14,7 +14,8 @@ namespace minixer
     inputChannels / outputChannels 位图。
 */
 class AsioAdvancedSettingsComponent  : public juce::Component,
-                                       public juce::Button::Listener
+                                       public juce::Button::Listener,
+                                       public juce::ComboBox::Listener
 {
 public:
     //==============================================================================
@@ -25,6 +26,7 @@ public:
     //==============================================================================
     void resized() override;
     void buttonClicked (juce::Button* button) override;
+    void comboBoxChanged (juce::ComboBox* comboBoxThatHasChanged) override;
 
 private:
     //==============================================================================
@@ -38,8 +40,19 @@ private:
     void resetUIToDefaults();
     void applyChannelSetup();
 
+    void updateModeVisibility();
+    void handleModeChanged (juce::ComboBox& modeComboBox,
+                            juce::ComboBox& leftBox,
+                            juce::ComboBox& rightBox,
+                            int maxChannels);
+    void ensureStereoChannelsDistinct (juce::ComboBox& leftBox,
+                                       juce::ComboBox& rightBox,
+                                       int maxChannels);
+    static int findNextDistinctChannelIndex (int leftIdx, int maxChannels);
+
     static int getNthSetBit (const juce::BigInteger& channels, int n);
     int getSelectedChannelIndex (juce::ComboBox& comboBox) const;
+    static bool isValidChannelIndex (int idx, int maxChannels);
     void closeDialog();
 
     //==============================================================================
@@ -49,12 +62,16 @@ private:
     juce::Label deviceNameLabel;
 
     juce::Label inputSectionLabel;
+    juce::Label inputModeLabel;
+    juce::ComboBox inputModeComboBox;
     juce::Label inputLeftLabel;
     juce::Label inputRightLabel;
     juce::ComboBox inputLeftComboBox;
     juce::ComboBox inputRightComboBox;
 
     juce::Label outputSectionLabel;
+    juce::Label outputModeLabel;
+    juce::ComboBox outputModeComboBox;
     juce::Label outputLeftLabel;
     juce::Label outputRightLabel;
     juce::ComboBox outputLeftComboBox;
