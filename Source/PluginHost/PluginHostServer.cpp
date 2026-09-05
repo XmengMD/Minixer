@@ -8,6 +8,8 @@
 
 #include "PluginHostServer.h"
 #include "PluginWrapper.h"
+#include "PluginScanner/VST3Scanner.h"
+#include "PluginScanner/VST3PluginDescriptionMapper.h"
 
 #if JUCE_WINDOWS
  #include <windows.h>
@@ -20,20 +22,34 @@ namespace
 {
 
 //==============================================================================
-/** 扫描模式下捕获结构化异常（SEH），避免子进程崩溃。 */
+/** 32 位扫描：自主扫描器 SEH 桥。
+    MSVC 禁止 __try 与 C++ 对象位于同一函数（C2712），采用“纯指针桥”模式。 */
 #if JUCE_WINDOWS
-bool safeFindAllTypesForFile (juce::AudioPluginFormat* format,
-                              juce::OwnedArray<juce::PluginDescription>* result,
-                              const juce::String* fileOrIdentifier)
+struct CustomScanJob
+{
+    vst3scan::VST3Scanner*         scanner;
+    const juce::File*              file;
+    vst3scan::PluginModuleRecord*  out;
+};
+
+int runCustomScanJob (CustomScanJob* job)
+{
+    if (job == nullptr || job->scanner == nullptr || job->file == nullptr || job->out == nullptr)
+        return 0;
+
+    *job->out = job->scanner->scanModule (*job->file, nullptr);
+    return 1;
+}
+
+int customScanShim (CustomScanJob* job)
 {
     __try
     {
-        format->findAllTypesForFile (*result, *fileOrIdentifier);
-        return true;
+        return runCustomScanJob (job);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return false;
+        return 0;
     }
 }
 #endif
@@ -151,38 +167,42 @@ bool PluginHostServer::connect (const juce::String& key,
 //==============================================================================
 int PluginHostServer::runScanMode()
 {
-    juce::AudioPluginFormatManager formatManager;
-    formatManager.addDefaultFormats();
-
-    juce::AudioPluginFormat* vst3Format = nullptr;
-
-    for (int i = 0; i < formatManager.getNumFormats(); ++i)
+    // 与主程序一致：使用自主 VST3 扫描器（先 setHostContext 再按完整 128 位
+    // CID 枚举），32 位外壳插件同样不再受“索引位移”影响。IPC 格式不变，
+    // 主程序 scanPluginViaHost 解析逻辑无需改动。
+    //
+    // 故意不析构 scanner（同 ScannerTest --worker 的设计）：结果经 IPC 发送后
+    // 进程立刻退出，由操作系统回收模块 —— 避免个别插件在 ExitDll()/FreeLibrary
+    // 阶段崩溃导致结果丢失或子进程异常退出。
+    auto* scanner = new vst3scan::VST3Scanner ([] (const juce::String& line)
     {
-        auto* format = formatManager.getFormat (i);
-        if (format != nullptr && format->getName() == juce::VST3PluginFormat::getFormatName())
-        {
-            vst3Format = format;
-            break;
-        }
-    }
+        juce::Logger::writeToLog ("[VST3Scan] " + line);
+    });
 
-    if (vst3Format == nullptr)
-    {
-        sendScanError ("VST3 format not available");
-        return 1;
-    }
-
-    juce::OwnedArray<juce::PluginDescription> descriptions;
+    vst3scan::PluginModuleRecord rec;
 
    #if JUCE_WINDOWS
-    if (! safeFindAllTypesForFile (vst3Format, &descriptions, &pluginPath))
+    const juce::File file (pluginPath);
+    CustomScanJob job { scanner, &file, &rec };
+
+    if (customScanShim (&job) == 0)
     {
         sendScanError ("Plugin scan raised a structured exception");
         return 1;
     }
    #else
-    vst3Format->findAllTypesForFile (descriptions, pluginPath);
+    rec = scanner->scanModule (juce::File (pluginPath), nullptr);
    #endif
+
+    if (! rec.loaded)
+    {
+        sendScanError (rec.loadError.isNotEmpty() ? rec.loadError
+                                                  : TRANS ("Failed to load module"));
+        return 1;
+    }
+
+    juce::OwnedArray<juce::PluginDescription> descriptions;
+    vst3scan::addDescriptionsFromModule (rec, descriptions);
 
     // 过滤无效描述
     for (int i = descriptions.size(); --i >= 0;)

@@ -138,6 +138,7 @@ set(_minixer_sources
     Source/PluginScanner/ScannerData.h
     Source/PluginScanner/VST3Scanner.h
     Source/PluginScanner/VST3Scanner.cpp
+    Source/PluginScanner/VST3PluginDescriptionMapper.h
     Source/IPC/IpcProtocol.h
     Source/IPC/IpcTransport.h
     Source/IPC/SharedMemoryRegion.h
@@ -189,6 +190,7 @@ set(_pluginhost_sources
     Source/PluginScanner/ScannerData.h
     Source/PluginScanner/VST3Scanner.h
     Source/PluginScanner/VST3Scanner.cpp
+    Source/PluginScanner/VST3PluginDescriptionMapper.h
     Source/IPC/IpcProtocol.h
     Source/IPC/IpcTransport.h
     Source/IPC/SharedMemoryRegion.h
