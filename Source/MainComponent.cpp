@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "PluginScanner/VST3Scanner.h"
 #include "Plugin/PluginRegistry.h"
 #include "Plugin/PluginArchitecture.h"
 #include "Plugin/PluginBridgeNode.h"
@@ -1301,6 +1302,22 @@ void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescrip
     }
 
     // 64-bit 插件仍按原有异步路径直接在宿主进程加载。
+    // —— 加载侧修复 ——
+    // JUCE 的 VST3PluginFormat 在 createPluginInstance 内部先解析类索引、之后才
+    // 调用 IPluginFactory3::setHostContext；外壳插件（WaveShell / IKM 等）在设置
+    // 宿主上下文后会重排/追加工厂类表，导致此前解析的索引失效而“点 A 出 B”。
+    // 这里先预加载模块并完成 setHostContext，使 JUCE 在“已展开”的类表上按
+    // name + CID 哈希匹配到正确索引（模块句柄保留到进程退出）。预加载失败不阻塞。
+    if (description.pluginFormatName == "VST3" && description.fileOrIdentifier.isNotEmpty())
+    {
+        juce::String prewarmError;
+        minixer::vst3scan::VST3Scanner::prewarmForLoad (juce::File (description.fileOrIdentifier),
+                                                        &prewarmError);
+
+        if (prewarmError.isNotEmpty())
+            juce::Logger::writeToLog ("VST3 preload skipped for " + description.fileOrIdentifier + ": " + prewarmError);
+    }
+
     PluginRegistry::getInstance().getFormatManager().createPluginInstanceAsync (
         description,
         sampleRate,
