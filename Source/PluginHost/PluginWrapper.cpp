@@ -8,6 +8,8 @@
 
 #include "PluginWrapper.h"
 
+#include "PluginScanner/VST3Scanner.h"
+
 #if JUCE_WINDOWS
  #include <windows.h>
 #endif
@@ -67,6 +69,23 @@ bool PluginWrapper::loadFromDescription (const juce::PluginDescription& descript
     {
         error = "VST3 format not available";
         return false;
+    }
+
+    // —— 加载侧修复 ——
+    // JUCE 的 VST3PluginFormat 在 createPluginInstance 内部会先按描述解析类索引、
+    // 之后才调用 IPluginFactory3::setHostContext。外壳插件（WaveShell / IKM 等）
+    // 在设置宿主上下文后会重排/追加工厂类表，导致此前解析的索引失效而“点 A 出 B”。
+    // 这里在 JUCE 真正创建实例之前把模块预加载好并完成 setHostContext，使 JUCE
+    // 随后在“已展开”的类表上按 name + CID 哈希匹配到正确索引（模块句柄保留到
+    // 进程退出，有意不卸载）。预加载失败不阻塞加载流程，由 JUCE 自行报错。
+    if (description.pluginFormatName == "VST3" && description.fileOrIdentifier.isNotEmpty())
+    {
+        juce::String prewarmError;
+        minixer::vst3scan::VST3Scanner::prewarmForLoad (juce::File (description.fileOrIdentifier),
+                                                        &prewarmError);
+
+        if (prewarmError.isNotEmpty())
+            juce::Logger::writeToLog ("VST3 preload skipped for " + description.fileOrIdentifier + ": " + prewarmError);
     }
 
     juce::String instanceError;

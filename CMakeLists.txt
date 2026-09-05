@@ -135,6 +135,9 @@ set(_minixer_sources
     Source/Plugin/PluginSlotState.h
     Source/Plugin/PluginSelectorComponent.cpp
     Source/Plugin/PluginSelectorComponent.h
+    Source/PluginScanner/ScannerData.h
+    Source/PluginScanner/VST3Scanner.h
+    Source/PluginScanner/VST3Scanner.cpp
     Source/IPC/IpcProtocol.h
     Source/IPC/IpcTransport.h
     Source/IPC/SharedMemoryRegion.h
@@ -183,6 +186,9 @@ set(_pluginhost_sources
     Source/PluginHost/PluginHostServer.h
     Source/PluginHost/PluginWrapper.cpp
     Source/PluginHost/PluginWrapper.h
+    Source/PluginScanner/ScannerData.h
+    Source/PluginScanner/VST3Scanner.h
+    Source/PluginScanner/VST3Scanner.cpp
     Source/IPC/IpcProtocol.h
     Source/IPC/IpcTransport.h
     Source/IPC/SharedMemoryRegion.h
@@ -221,7 +227,8 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_include_directories(Minixer PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Source
         ${CMAKE_CURRENT_SOURCE_DIR}/JuceLibraryCode
-        ${_asio_include_dir})
+        ${_asio_include_dir}
+        ${JUCE_DIR}/modules/juce_audio_processors/format_types/VST3_SDK)
 
     target_compile_definitions(Minixer PRIVATE
         JUCE_STRICT_REFCOUNTEDPOINTER=1
@@ -278,9 +285,10 @@ endif()
 target_sources(PluginHost PRIVATE ${_pluginhost_sources})
 
 target_include_directories(PluginHost PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/Source
-    ${CMAKE_CURRENT_SOURCE_DIR}/JuceLibraryCode
-    ${_asio_include_dir})
+        ${CMAKE_CURRENT_SOURCE_DIR}/Source
+        ${CMAKE_CURRENT_SOURCE_DIR}/JuceLibraryCode
+        ${_asio_include_dir}
+        ${JUCE_DIR}/modules/juce_audio_processors/format_types/VST3_SDK)
 
 target_compile_definitions(PluginHost PRIVATE
     JUCE_STRICT_REFCOUNTEDPOINTER=1

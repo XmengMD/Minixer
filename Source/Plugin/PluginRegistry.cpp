@@ -10,6 +10,7 @@
 #include "PluginArchitecture.h"
 #include "PluginHostLauncher.h"
 #include "PluginBlacklist.h"
+#include "PluginScanner/VST3Scanner.h"
 #include "../IPC/IpcTransport.h"
 #include "../IPC/IpcProtocol.h"
 #include "../Settings/AppSettings.h"
@@ -75,23 +76,193 @@ static void sanitizePluginDescription (juce::PluginDescription& desc)
 }
 
 //==============================================================================
+// —— 自主 VST3 扫描器（替换 JUCE 自带 VST3PluginFormat 扫描）——
+//
+// 背景：JUCE 内建 VST3 扫描/加载在 setHostContext 之前解析类索引，外壳插件
+// （WaveShell / IKM 等）在设置宿主上下文后重排/追加工厂类表，导致索引失效而
+// “点 A 出 B”。本工程改用自主扫描器：先 setHostContext 再按完整 128 位 CID
+// 枚举，配合加载侧预加载（PluginWrapper）规避灰名错位。
+//
+// 为了不修改 JUCE 源码，加载期仍由 JUCE VST3PluginFormat 创建实例（它按
+// name + uniqueId/deprecatedUid 哈希匹配类），因此这里必须精确复刻 JUCE 的
+// 哈希算法（juce_VST3PluginFormat.cpp 的 getHashForRange / getNormalisedTUID，
+// FUID 取 COM_COMPATIBLE=1 的 getLong1..4 字节序），保证扫描结果能被加载期匹配。
+
+/** 复刻 JUCE getHashForRange(TUID)：TUID 是 char[16]，逐字节（有符号扩展）累加。 */
+static juce::int32 vst3DeprecatedUidHash (const vst3scan::CID16& cid) noexcept
+{
+    juce::uint32 value = 0;
+
+    for (auto b : cid.bytes)
+        value = (value * 31u) + (juce::uint32) (juce::int8) b;
+
+    return (juce::int32) value;
+}
+
+/** 复刻 JUCE getHashForRange(getNormalisedTUID())：FUID(COM_COMPATIBLE) 四字序累加。 */
+static juce::int32 vst3UniqueIdHash (const vst3scan::CID16& cid) noexcept
+{
+    const auto& d = cid.bytes;
+    const auto b  = [&d] (size_t i) { return (juce::uint32) d[i]; };
+
+    const juce::uint32 l1 = (b (3) << 24) | (b (2) << 16) | (b (1) << 8) | b (0);
+    const juce::uint32 l2 = (b (5) << 24) | (b (4) << 16) | (b (7) << 8) | b (6);
+    const juce::uint32 l3 = (b (8) << 24) | (b (9) << 16) | (b (10) << 8) | b (11);
+    const juce::uint32 l4 = (b (12) << 24) | (b (13) << 16) | (b (14) << 8) | b (15);
+
+    juce::uint32 value = 0;
+
+    for (auto item : { l1, l2, l3, l4 })
+        value = (value * 31u) + item;
+
+    return (juce::int32) value;
+}
+
+/** 将自主扫描的一个 .vst3 模块记录转换为 PluginDescription 列表。
+    仅收录音频效果类（VST3 乐器以 Instrument 子类别注册在 Audio Module Class），
+    与 JUCE 自带扫描的 kVstAudioEffectClass 过滤保持一致。 */
+static void addDescriptionsFromModule (const vst3scan::PluginModuleRecord& rec,
+                                       juce::OwnedArray<juce::PluginDescription>& result)
+{
+    const juce::File file (rec.filePath);
+    const auto modTime = file.getLastModificationTime();
+    const auto now     = juce::Time::getCurrentTime();
+
+    for (const auto& cr : rec.classes)
+    {
+        if (cr.category != "Audio Module Class")
+            continue;
+
+        auto desc = std::make_unique<juce::PluginDescription>();
+
+        desc->fileOrIdentifier   = rec.filePath;
+        desc->lastFileModTime    = modTime;
+        desc->lastInfoUpdateTime = now;
+        desc->manufacturerName   = cr.vendor.trim().isNotEmpty() ? cr.vendor.trim()
+                                                                 : rec.factoryVendor.trim();
+        // name 必须等于 PClassInfo 的 ASCII 名称（加载期 findClassMatchingDescription 按 name 匹配）
+        desc->name               = cr.name.trim();
+        desc->descriptiveName    = cr.displayName();          // 显示名优先 Unicode（PClassInfoW）
+        desc->pluginFormatName   = "VST3";
+        desc->numInputChannels   = 0;                          // 加载时按插件实际总线重新配置
+        desc->numOutputChannels  = 0;
+        desc->version            = cr.version.trim();
+
+        const auto sub = cr.subCategories.trim();
+        desc->category     = sub.isNotEmpty() ? sub : cr.category;
+        desc->isInstrument = desc->category.containsIgnoreCase ("Instrument");
+
+        desc->deprecatedUid = vst3DeprecatedUidHash (cr.cid);
+        desc->uniqueId      = vst3UniqueIdHash (cr.cid);
+
+        result.add (std::move (desc));
+    }
+}
+
+/** 全局共享的扫描器实例（进程生命周期有效）。
+    有意不释放：避免应用退出时对不稳定插件执行 ExitDll/FreeLibrary 导致崩溃；
+    已加载模块句柄由操作系统在进程退出时统一回收。 */
+static vst3scan::VST3Scanner& getCustomScanner()
+{
+    static auto* scanner = new vst3scan::VST3Scanner ([] (const juce::String& line)
+    {
+        juce::Logger::writeToLog ("[VST3Scan] " + line);
+    });
+    return *scanner;
+}
+
 #if JUCE_WINDOWS
-/** 在 Windows 上捕获插件扫描过程中可能触发的结构化异常（SEH）。 */
-static bool safeFindAllTypesForFile (juce::AudioPluginFormat* format,
-                                     juce::OwnedArray<juce::PluginDescription>* result,
-                                     const juce::String* fileOrIdentifier)
+namespace
+{
+
+//==============================================================================
+// SEH 桥：MSVC 禁止 __try 与 C++ 对象位于同一函数（C2712），
+// 采用“纯指针桥”模式——__try 内只做一次普通函数调用。
+struct CustomScanJob
+{
+    vst3scan::VST3Scanner*   scanner;
+    const juce::File*        file;
+    vst3scan::PluginModuleRecord* out;
+};
+
+int runCustomScanJob (CustomScanJob* job)
+{
+    if (job == nullptr || job->scanner == nullptr || job->file == nullptr || job->out == nullptr)
+        return 0;
+
+    *job->out = job->scanner->scanModule (*job->file, nullptr);
+    return 1;
+}
+
+int customScanShim (CustomScanJob* job)
 {
     __try
     {
-        format->findAllTypesForFile (*result, *fileOrIdentifier);
-        return true;
+        return runCustomScanJob (job);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return false;
+        return 0;
     }
 }
+
+} // namespace
+
 #endif
+
+/** 自主扫描单个 .vst3 文件并转成 PluginDescription。 */
+static void scanFileWithCustomScanner (const juce::File& file,
+                                       juce::OwnedArray<juce::PluginDescription>& result,
+                                       juce::String& errorMessage)
+{
+    errorMessage.clear();
+
+    vst3scan::PluginModuleRecord rec;
+
+   #if JUCE_WINDOWS
+    CustomScanJob job { &getCustomScanner(), &file, &rec };
+
+    try
+    {
+        if (customScanShim (&job) == 0)
+        {
+            result.clear();
+            errorMessage = TRANS ("Plugin scan raised a structured exception");
+            return;
+        }
+    }
+    catch (...)
+    {
+        result.clear();
+        errorMessage = TRANS ("Plugin scan threw a C++ exception");
+        return;
+    }
+   #else
+    try
+    {
+        rec = getCustomScanner().scanModule (file, nullptr);
+    }
+    catch (...)
+    {
+        result.clear();
+        errorMessage = TRANS ("Plugin scan threw a C++ exception");
+        return;
+    }
+   #endif
+
+    if (! rec.loaded)
+    {
+        result.clear();
+        errorMessage = rec.loadError.isNotEmpty() ? rec.loadError
+                                                  : TRANS ("Failed to load module");
+        return;
+    }
+
+    addDescriptionsFromModule (rec, result);
+
+    if (result.isEmpty())
+        errorMessage = TRANS ("No plugin descriptions found");
+}
 
 //==============================================================================
 /** 通过 PluginHost 子进程扫描 32-bit 插件，返回描述列表。
@@ -416,6 +587,8 @@ public:
                              juce::OwnedArray<juce::PluginDescription>& result,
                              const juce::String& fileOrIdentifier) override
     {
+        // 扫描已完全交给自主扫描器，不再依赖 JUCE 的格式实现。
+        juce::ignoreUnused (format);
         // 维护当前正在扫描的文件计数。即使在同步消息线程扫描模式下，JUCE 的进度
         // 对话框仍可能在单个文件扫描期间泵送消息循环；该计数器可防止在此时把
         // 扫描误判为空闲并提前结束报告。
@@ -440,6 +613,17 @@ public:
         const auto file = juce::File (fileOrIdentifier);
         const auto now  = juce::Time::getCurrentTime();
 
+        // OS/解压残留文件（__MACOSX / ._* / .DS_Store / .Trashes 等）直接跳过：
+        // 返回 false 令其进入 JUCE 黑名单——PluginDirectoryScanner 只把
+        // “未黑名单且零类型”的文件列为 failed，进黑名单后既不会重复扫描，
+        // 也不会出现在 “failed to load” 列表里（枚举路径已提前过滤，这里是兜底）。
+        if (vst3scan::VST3Scanner::isOsResidueFile (file))
+        {
+            juce::Logger::writeToLog ("Skipping OS residue file: " + fileOrIdentifier);
+            registry.lastScanActivityTime = now;
+            return false;
+        }
+
         // PluginListComponent 触发的扫描没有显式的开始回调；当第一个文件进入扫描
         // 且当前没有进行中的报告时，自动开启一次新的扫描会话。
         if (! registry.scanInProgress)
@@ -447,97 +631,87 @@ public:
 
         ++registry.lastReport.totalFiles;
 
+        // bundle 目录（*.vst3 目录）→ 解析到实际 DLL 文件再扫描（普通文件原样返回）。
+        // 无法解析（如只含 macOS 二进制的跨平台直达包）则记为失败，原因清晰可见。
+        const auto libFile = vst3scan::VST3Scanner::resolveLibraryFile (file);
+
+        if (! libFile.existsAsFile())
+        {
+            juce::Logger::writeToLog ("No loadable .vst3 library inside: " + fileOrIdentifier);
+            updateResult (file, result, TRANS ("No loadable .vst3 library found in bundle"));
+            registry.lastScanActivityTime = now;
+            return true;
+        }
+
         // 黑名单跳过：除非用户勾选“重新扫描上次出错的插件”，否则跳过黑名单中的插件。
-        if (PluginBlacklist::getInstance().isBlacklisted (file.getFullPathName()))
+        if (PluginBlacklist::getInstance().isBlacklisted (libFile.getFullPathName()))
         {
             if (! registry.rescanFailedPlugins)
             {
                 juce::Logger::writeToLog ("Skipping blacklisted plugin file: " + fileOrIdentifier);
-                registry.recordScanBlacklisted (file);
+                registry.recordScanBlacklisted (libFile);
                 registry.lastScanActivityTime = now;
                 return true;
             }
 
             // 用户要求重试：清除该条黑名单记录，本次重新扫描。
             juce::Logger::writeToLog ("Retrying blacklisted plugin file: " + fileOrIdentifier);
-            PluginBlacklist::getInstance().clearEntry (file.getFullPathName());
+            PluginBlacklist::getInstance().clearEntry (libFile.getFullPathName());
         }
 
         // 增量扫描：文件未变化且上次扫描成功时直接复用已知描述。
-        if (registry.shouldSkipFile (file))
+        if (registry.shouldSkipFile (libFile))
         {
             juce::Logger::writeToLog ("Skipping unchanged plugin file: " + fileOrIdentifier);
 
             for (const auto& desc : registry.knownList.getTypes())
             {
-                if (desc.fileOrIdentifier == fileOrIdentifier)
+                if (desc.fileOrIdentifier == libFile.getFullPathName())
                     result.add (std::make_unique<juce::PluginDescription> (desc));
             }
 
-            registry.recordScanSuccess (file, result, true);
+            registry.recordScanSuccess (libFile, result, true);
             registry.lastScanActivityTime = now;
             return true;
         }
 
-        // 先直接让 JUCE 扫描，不预先根据架构过滤。这样即使架构识别出错，
-        // 64-bit 插件也能在本进程正确识别；同时 SEH/try-catch 能保护宿主。
-        scanWithJuce (format, result, fileOrIdentifier);
+        // —— 自主 VST3 扫描器（替换 JUCE 自带 VST3PluginFormat 扫描）——
+        // 关键差异：先 setHostContext 再枚举，按完整 128 位 CID 记录；
+        // 避免外壳插件（WaveShell / IKM 等）类表索引位移导致的“点 A 出 B”。
+        // 32-bit 插件在本进程 LoadLibraryW 必然失败，回退到 PluginHost 子进程桥接。
+        juce::String customScanError;
+        scanFileWithCustomScanner (libFile, result, customScanError);
 
-        // 如果直接扫描没拿到描述，并且文件是 32-bit，再尝试用 PluginHost32 桥接。
-        if (result.isEmpty())
+        if (result.isEmpty() && detectPluginArchitecture (libFile) == PluginArchitecture::x86)
         {
-            const auto arch = detectPluginArchitecture (file);
+            juce::Logger::writeToLog ("Custom scan returned empty; trying 32-bit bridge for: " + fileOrIdentifier);
 
-            if (arch == PluginArchitecture::x86)
+            if (scanPluginViaHost (libFile.getFullPathName(), PluginArchitecture::x86, result))
             {
-                juce::Logger::writeToLog ("Direct scan returned empty; trying 32-bit bridge for: " + fileOrIdentifier);
-
-                if (scanPluginViaHost (fileOrIdentifier, arch, result))
+                for (auto* desc : result)
                 {
-                    registry.lastScanActivityTime = now;
-                    updateResult (file, result, {});
-                    return true;
+                    if (desc != nullptr)
+                        sanitizePluginDescription (*desc);
                 }
 
-                result.clear();
+                registry.lastScanActivityTime = now;
+                updateResult (libFile, result, {});
+                return true;
             }
         }
 
-        updateResult (file, result, {});
+        for (auto* desc : result)
+        {
+            if (desc != nullptr)
+                sanitizePluginDescription (*desc);
+        }
+
+        updateResult (libFile, result, customScanError);
         registry.lastScanActivityTime = now;
         return true;
     }
 
 private:
-    void scanWithJuce (juce::AudioPluginFormat& format,
-                       juce::OwnedArray<juce::PluginDescription>& result,
-                       const juce::String& fileOrIdentifier)
-    {
-        try
-        {
-           #if JUCE_WINDOWS
-            if (! safeFindAllTypesForFile (&format, &result, &fileOrIdentifier))
-            {
-                result.clear();
-                juce::Logger::writeToLog ("Plugin scan raised a structured exception for: " + fileOrIdentifier);
-            }
-           #else
-            format.findAllTypesForFile (result, fileOrIdentifier);
-           #endif
-
-            for (auto* desc : result)
-            {
-                if (desc != nullptr)
-                    sanitizePluginDescription (*desc);
-            }
-        }
-        catch (...)
-        {
-            result.clear();
-            juce::Logger::writeToLog ("Plugin scan threw a C++ exception for: " + fileOrIdentifier);
-        }
-    }
-
     void updateResult (const juce::File& file,
                        const juce::OwnedArray<juce::PluginDescription>& result,
                        const juce::String& errorMessage)
@@ -956,7 +1130,26 @@ void PluginRegistry::scanForVST3Internal (const juce::FileSearchPath& extraPaths
     for (int i = 0; i < extraPaths.getNumPaths(); ++i)
         pathsToScan.add (extraPaths[i]);
 
-    auto files = vst3Format->searchPathsForPlugins (pathsToScan, recursive, false);
+    // 自主枚举 .vst3（普通文件 + bundle 目录）：主动过滤其他系统/解压残留
+    // （__MACOSX、AppleDouble ._* 等），并把 bundle 目录解析为实际 DLL，
+    // 替代 JUCE VST3PluginFormat::searchPathsForPlugins（其不做过滤）。
+    juce::StringArray files;
+
+    for (int i = 0; i < pathsToScan.getNumPaths(); ++i)
+    {
+        const juce::File dir (pathsToScan[i]);
+
+        if (! dir.isDirectory())
+            continue;
+
+        for (const auto& f : vst3scan::VST3Scanner::findVST3Files (dir, recursive))
+        {
+            const auto lib = vst3scan::VST3Scanner::resolveLibraryFile (f);
+
+            if (lib.existsAsFile())
+                files.addIfNotAlreadyThere (lib.getFullPathName());
+        }
+    }
 
     for (auto& file : files)
     {
