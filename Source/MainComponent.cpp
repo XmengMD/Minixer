@@ -1,13 +1,35 @@
 #include "MainComponent.h"
-#include "PluginScanner/VST3Scanner.h"
 #include "Plugin/PluginRegistry.h"
 #include "Plugin/PluginArchitecture.h"
 #include "Plugin/PluginBridgeNode.h"
 #include "Plugin/PluginSelectorComponent.h"
 #include "Settings/AppSettings.h"
 
+#include <mutex>
+
 namespace minixer
 {
+
+//==============================================================================
+/** 单个插件槽位的异步加载结果（后台线程 → 消息线程）。 */
+struct PluginLoadOutcome
+{
+    uint64_t generation = 0;                 // 发起加载时的槽位代数
+    bool ok = false;
+    juce::String error;
+    std::unique_ptr<PluginBridgeNode> bridge; // 成功时为已初始化节点
+    juce::PluginDescription description;     // 完成时更新 slotStates 用
+    std::optional<PluginSlotState> stateToRestore;
+};
+
+/** 单个插件槽位的共享加载状态。 */
+struct PluginLoadSlot
+{
+    std::mutex mutex;
+    uint64_t generation = 0;                  // 每次新加载/取消递增，作废在途任务
+    bool pending = false;
+    std::unique_ptr<PluginLoadOutcome> outcome;
+};
 
 //==============================================================================
 MonoToStereoProcessor::MonoToStereoProcessor()
@@ -255,6 +277,12 @@ MainComponent::MainComponent()
     // 启动定时器更新 UI 电平
     startTimerHz (30);
 
+    // 插件后台加载线程池（少量并发，UI 线程不参与加载/校验）与共享槽位状态
+    pluginLoaderPool = std::make_unique<juce::ThreadPool> (4);
+
+    for (auto& slot : pluginLoadSlots)
+        slot = std::make_shared<PluginLoadSlot>();
+
     // 应用启动设置（自动加载预设等）
     applyStartupSettings();
 
@@ -279,6 +307,11 @@ MainComponent::~MainComponent()
     hid.removeListener (this);
 
     stopTimer();
+
+    // 终止仍在进行中的后台加载任务（等 5s；极端情况下在途任务会继续运行至
+    // 自身 120s 超时，进程退出时由操作系统回收，不阻塞 UI 线程）。
+    if (pluginLoaderPool != nullptr)
+        pluginLoaderPool->removeAllJobs (true, 5000);
 
     closeAllPluginEditors();
 
@@ -382,6 +415,9 @@ void MainComponent::timerCallback()
 
     // 检测焦点外的系统全局插槽快捷键
     pollGlobalSlotShortcuts();
+
+    // 取回后台线程完成的插件桥接加载结果（消息线程执行图操作）
+    processSlotLoadResults();
 }
 
 //==============================================================================
@@ -1171,6 +1207,10 @@ void MainComponent::refreshSlotDisplays()
 //==============================================================================
 void MainComponent::moveSlotContent (int fromIndex, int toIndex)
 {
+    // 移动期间作废两个槽位的在途加载，避免旧加载完成后写回错位槽位
+    cancelSlotLoadsForSlot (fromIndex);
+    cancelSlotLoadsForSlot (toIndex);
+
     auto sourceState = slotStates[fromIndex];
     auto sourceNode  = pluginSlotNodes[fromIndex];
 
@@ -1235,7 +1275,7 @@ void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescrip
     if (audioGraph == nullptr)
         return;
 
-    // 先移除该槽位已有的插件，避免重复占用
+    // 先移除该槽位已有的插件，并作废该槽位一切在途加载，避免重复占用
     removePluginFromSlot (slotIndex, false);
 
     statusLabel.setText (TRANS ("Loading ") + description.name + TRANS ("..."),
@@ -1251,149 +1291,188 @@ void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescrip
 
     const auto arch = detectPluginArchitecture (juce::File (description.fileOrIdentifier));
 
-    // 32-bit 插件通过独立子进程桥接加载，避免 64-bit 宿主无法直接加载 32-bit DLL。
-    if (arch == PluginArchitecture::x86 && ! canHostLoadArchitectureDirectly (arch))
-    {
-        auto bridgeNode = std::make_unique<PluginBridgeNode> (description, arch);
-        juce::String error;
-
-        if (bridgeNode->initialize (sampleRate, bufferSize, error))
-        {
-            bridgeNode->addListener (this);
-            bridgeNode->prepareToPlay (sampleRate, bufferSize);
-
-            auto node = audioGraph->addNode (std::move (bridgeNode));
-
-            if (node != nullptr)
-            {
-                pluginSlotNodes[slotIndex] = node;
-                slotStates[slotIndex].pluginIdentifier = description.createIdentifierString();
-                slotStates[slotIndex].pluginName       = description.name;
-
-                if (stateToRestore.has_value()
-                    && stateToRestore->pluginIdentifier == slotStates[slotIndex].pluginIdentifier)
-                {
-                    if (stateToRestore->pluginState.getSize() > 0)
-                    {
-                        node->getProcessor()->setStateInformation (stateToRestore->pluginState.getData(),
-                                                                   static_cast<int> (stateToRestore->pluginState.getSize()));
-                    }
-                }
-
-                applySlotBypassDefault (slotIndex);
-                rebuildPluginChain();
-
-                statusLabel.setText (TRANS ("Loaded ") + slotStates[slotIndex].pluginName + TRANS (" in slot ") + juce::String (slotIndex + 1),
-                                     juce::dontSendNotification);
-            }
-            else
-            {
-                statusLabel.setText (TRANS ("Failed to add plugin to graph"),
-                                     juce::dontSendNotification);
-            }
-        }
-        else
-        {
-            statusLabel.setText (TRANS ("Failed to load bridged plugin: ") + error,
-                                 juce::dontSendNotification);
-        }
-
-        return;
-    }
-
-    // 64-bit 插件仍按原有异步路径直接在宿主进程加载。
-    // —— 加载侧修复 ——
-    // JUCE 的 VST3PluginFormat 在 createPluginInstance 内部先解析类索引、之后才
-    // 调用 IPluginFactory3::setHostContext；外壳插件（WaveShell / IKM 等）在设置
-    // 宿主上下文后会重排/追加工厂类表，导致此前解析的索引失效而“点 A 出 B”。
-    // 这里先预加载模块并完成 setHostContext，使 JUCE 在“已展开”的类表上按
-    // name + CID 哈希匹配到正确索引（模块句柄保留到进程退出）。预加载失败不阻塞。
-    if (description.pluginFormatName == "VST3" && description.fileOrIdentifier.isNotEmpty())
-    {
-        juce::String prewarmError;
-        minixer::vst3scan::VST3Scanner::prewarmForLoad (juce::File (description.fileOrIdentifier),
-                                                        &prewarmError);
-
-        if (prewarmError.isNotEmpty())
-            juce::Logger::writeToLog ("VST3 preload skipped for " + description.fileOrIdentifier + ": " + prewarmError);
-    }
-
-    PluginRegistry::getInstance().getFormatManager().createPluginInstanceAsync (
-        description,
-        sampleRate,
-        bufferSize,
-        [this, slotIndex, description, stateToRestore] (std::unique_ptr<juce::AudioPluginInstance> instance,
-                                                        const juce::String& errorMessage)
-    {
-        onPluginInstanceCreated (slotIndex, description, std::move (instance), errorMessage, stateToRestore);
-    });
+    // 所有架构（x86 / x64 / 未知）统一通过 PluginHost 子进程桥接加载：
+    // 插件 DLL 的加载、实例化、license 校验全部在子进程内完成，与主进程 UI
+    // 完全隔离，加载期间主界面保持可交互、音频通路保持连贯。
+    startSlotLoad (slotIndex, description, arch, sampleRate, bufferSize, stateToRestore);
 }
 
 //==============================================================================
-void MainComponent::onPluginInstanceCreated (int slotIndex,
-                                             const juce::PluginDescription& description,
-                                             std::unique_ptr<juce::AudioPluginInstance> instance,
-                                             const juce::String& errorMessage,
-                                             const std::optional<PluginSlotState>& stateToRestore)
+void MainComponent::startSlotLoad (int slotIndex, const juce::PluginDescription& description,
+                                   PluginArchitecture arch, double sampleRate, int bufferSize,
+                                   const std::optional<PluginSlotState>& stateToRestore)
 {
     if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
         return;
 
-    if (instance == nullptr)
+    auto slot = pluginLoadSlots[slotIndex];
+
+    if (slot == nullptr || pluginLoaderPool == nullptr)
     {
-        statusLabel.setText (TRANS ("Failed to load plugin: ") + errorMessage,
+        statusLabel.setText (TRANS ("Failed to load plugin: internal error"),
                              juce::dontSendNotification);
         return;
     }
 
-    // 与 JUCE AudioPluginHost 保持一致：先启用所有总线，避免插件默认总线未激活
-    // 导致 graph 连接时通道数为 0。
-    instance->enableAllBuses();
-
-    auto sampleRate = audioDeviceManager.getCurrentAudioDevice() != nullptr
-                          ? audioDeviceManager.getCurrentAudioDevice()->getCurrentSampleRate()
-                          : 44100.0;
-
-    auto bufferSize = audioDeviceManager.getCurrentAudioDevice() != nullptr
-                          ? audioDeviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
-                          : 512;
-
-    instance->prepareToPlay (sampleRate, bufferSize);
-
-    auto node = audioGraph->addNode (std::move (instance));
-
-    if (node == nullptr)
+    uint64_t generation = 0;
     {
-        statusLabel.setText (TRANS ("Failed to add plugin to graph"),
-                             juce::dontSendNotification);
-        return;
+        std::lock_guard<std::mutex> lock (slot->mutex);
+
+        ++slot->generation;
+        generation = slot->generation;
+
+        // 丢弃尚未被消息线程取走的旧结果，避免新旧加载混淆
+        slot->outcome.reset();
+        slot->pending = false;
     }
 
-    pluginSlotNodes[slotIndex] = node;
-
-    auto* processor = node->getProcessor();
-
-    slotStates[slotIndex].pluginIdentifier = description.createIdentifierString();
-    slotStates[slotIndex].pluginName       = description.name.isEmpty() ? processor->getName() : description.name;
-
-    // 若需要恢复预设/剪贴板状态，则先恢复插件参数
-    if (stateToRestore.has_value()
-        && stateToRestore->pluginIdentifier == slotStates[slotIndex].pluginIdentifier)
+    // 后台线程执行桥接初始化（子进程启动 + 插件加载 + license 校验等耗时操作）。
+    // 期间 UI 不做任何同步等待；结果写入共享槽位，由消息线程定时器取回。
+    // 显式指定 JobStatus 返回类型，避免与 addJob(std::function<void()>) 重载歧义。
+    auto loadTask = [slot, generation, description, arch, sampleRate, bufferSize, stateToRestore]() -> juce::ThreadPoolJob::JobStatus
     {
-        if (stateToRestore->pluginState.getSize() > 0)
+        auto outcome = std::make_unique<PluginLoadOutcome>();
+        outcome->generation     = generation;
+        outcome->description    = description;
+        outcome->stateToRestore = stateToRestore;
+
+        auto bridge = std::make_unique<PluginBridgeNode> (description, arch);
+        juce::String error;
+
+        if (! bridge->initialize (sampleRate, bufferSize, error))
         {
-            processor->setStateInformation (stateToRestore->pluginState.getData(),
-                                            static_cast<int> (stateToRestore->pluginState.getSize()));
+            outcome->error = error;
+            bridge->shutdown();
+            bridge.reset();
         }
+
+        outcome->bridge = std::move (bridge);
+        outcome->ok = (outcome->bridge != nullptr);
+
+        {
+            std::lock_guard<std::mutex> lock (slot->mutex);
+            slot->outcome = std::move (outcome);
+            slot->pending = true;
+        }
+
+        return juce::ThreadPoolJob::jobHasFinished;
+    };
+
+    pluginLoaderPool->addJob (std::function<juce::ThreadPoolJob::JobStatus()> (std::move (loadTask)));
+}
+
+//==============================================================================
+void MainComponent::cancelSlotLoadsForSlot (int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
+        return;
+
+    auto slot = pluginLoadSlots[slotIndex];
+    if (slot == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> lock (slot->mutex);
+
+    // 递增代数：任何在途加载完成时与当前代数不符，将被丢弃并关闭其子进程
+    ++slot->generation;
+
+    // 丢弃尚未被消息线程取走的结果
+    slot->outcome.reset();
+    slot->pending = false;
+}
+
+//==============================================================================
+void MainComponent::processSlotLoadResults()
+{
+    for (int slotIndex = 0; slotIndex < defaultNumPluginSlots; ++slotIndex)
+    {
+        auto slot = pluginLoadSlots[slotIndex];
+        if (slot == nullptr)
+            continue;
+
+        std::unique_ptr<PluginLoadOutcome> outcome;
+        uint64_t currentGeneration = 0;
+
+        {
+            std::lock_guard<std::mutex> lock (slot->mutex);
+
+            if (! slot->pending)
+                continue;
+
+            outcome = std::move (slot->outcome);
+            slot->outcome.reset();
+            slot->pending = false;
+            currentGeneration = slot->generation;
+        }
+
+        if (outcome == nullptr)
+            continue;
+
+        // 该槽位已发生新的加载请求或已被移除 → 作废本次结果（关闭其子进程）
+        if (outcome->generation != currentGeneration)
+        {
+            if (outcome->bridge != nullptr)
+                outcome->bridge->shutdown();
+            continue;
+        }
+
+        if (! outcome->ok)
+        {
+            statusLabel.setText (TRANS ("Failed to load bridged plugin: ") + outcome->error,
+                                 juce::dontSendNotification);
+            continue;
+        }
+
+        auto* bridge = outcome->bridge.get();
+
+        bridge->addListener (this);
+
+        const auto sampleRate = audioDeviceManager.getCurrentAudioDevice() != nullptr
+                                    ? audioDeviceManager.getCurrentAudioDevice()->getCurrentSampleRate()
+                                    : 44100.0;
+
+        const auto bufferSize = audioDeviceManager.getCurrentAudioDevice() != nullptr
+                                    ? audioDeviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
+                                    : 512;
+
+        bridge->prepareToPlay (sampleRate, bufferSize);
+
+        auto node = audioGraph->addNode (std::move (outcome->bridge));
+
+        if (node == nullptr)
+        {
+            statusLabel.setText (TRANS ("Failed to add plugin to graph"),
+                                 juce::dontSendNotification);
+            continue;
+        }
+
+        pluginSlotNodes[slotIndex] = node;
+
+        auto* processor = node->getProcessor();
+
+        slotStates[slotIndex].pluginIdentifier = outcome->description.createIdentifierString();
+        slotStates[slotIndex].pluginName       = outcome->description.name.isEmpty() ? processor->getName()
+                                                                                     : outcome->description.name;
+
+        // 若需要恢复预设/剪贴板状态，则先恢复插件参数
+        if (outcome->stateToRestore.has_value()
+            && outcome->stateToRestore->pluginIdentifier == slotStates[slotIndex].pluginIdentifier)
+        {
+            if (outcome->stateToRestore->pluginState.getSize() > 0)
+            {
+                processor->setStateInformation (outcome->stateToRestore->pluginState.getData(),
+                                                static_cast<int> (outcome->stateToRestore->pluginState.getSize()));
+            }
+        }
+
+        // 新插件/替换/预设/粘贴加载后，统一按“全局旁通 + 槽位快捷键默认值”刷新 bypass
+        applySlotBypassDefault (slotIndex);
+
+        rebuildPluginChain();
+
+        statusLabel.setText (TRANS ("Loaded ") + slotStates[slotIndex].pluginName + TRANS (" in slot ") + juce::String (slotIndex + 1),
+                             juce::dontSendNotification);
     }
-
-    // 新插件/替换/预设/粘贴加载后，统一按“全局旁通 + 槽位快捷键默认值”刷新 bypass
-    applySlotBypassDefault (slotIndex);
-
-    rebuildPluginChain();
-
-    statusLabel.setText (TRANS ("Loaded ") + slotStates[slotIndex].pluginName + TRANS (" in slot ") + juce::String (slotIndex + 1),
-                         juce::dontSendNotification);
 }
 
 //==============================================================================
@@ -1401,6 +1480,9 @@ void MainComponent::removePluginFromSlot (int slotIndex, bool rebuildChain)
 {
     if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
         return;
+
+    // 作废该槽位一切在途加载（防止旧加载完成后又把节点塞回已移除的槽位）
+    cancelSlotLoadsForSlot (slotIndex);
 
     if (pluginSlotNodes[slotIndex] != nullptr)
     {

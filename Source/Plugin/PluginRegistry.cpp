@@ -200,7 +200,8 @@ static void scanFileWithCustomScanner (const juce::File& file,
 */
 static bool scanPluginViaHost (const juce::String& fileOrIdentifier,
                                PluginArchitecture arch,
-                               juce::OwnedArray<juce::PluginDescription>& result)
+                               juce::OwnedArray<juce::PluginDescription>& result,
+                               const std::atomic<bool>* cancelled = nullptr)
 {
    #if ! JUCE_WINDOWS
     juce::ignoreUnused (fileOrIdentifier, arch, result);
@@ -236,6 +237,9 @@ static bool scanPluginViaHost (const juce::String& fileOrIdentifier,
     // 扫描应在 30 秒内完成
     for (int attempt = 0; attempt < 300; ++attempt)
     {
+        if (cancelled != nullptr && cancelled->load (std::memory_order_relaxed))
+            break; // 用户取消扫描
+
         if (transport->readMessage (frame, 100))
         {
             gotResult = true;
@@ -658,6 +662,189 @@ private:
 };
 
 //==============================================================================
+// —— 异步扫描：后台线程 + PluginHost 子进程逐文件扫描 ——
+//
+// 线程安全模型：
+//   - 后台线程（ScanWorkerThread）只做三件事：目录枚举、逐文件通过 PluginHost
+//     子进程（或进程内兜底）扫描、把每个文件的结果压入 pendingResults 队列。
+//     它不直接触碰 KnownPluginList / 扫描报告。
+//   - 消息线程定期调用 pumpScanResults()，从队列取出结果，在消息线程上更新
+//     KnownPluginList、增量元数据与扫描报告，从而避免与被扫描插件执行相关的
+//     JUCE 消息线程断言，也避免整个软件在扫描期间卡死。
+//   - 进度（total / completed / detail）由 worker 写、UI 定时读取，用 progressLock 保护。
+
+//==============================================================================
+struct PluginRegistry::ScanFileResult
+{
+    enum class Type
+    {
+        Success,       // 扫描成功，descriptions 有效
+        Skipped,       // 增量未变化，消息线程从已知列表复用描述
+        Failed,        // 扫描失败，errorMessage 有效
+        Blacklisted    // 因黑名单跳过（未勾选重试）
+    };
+
+    Type type = Type::Failed;
+    juce::String                             filePath;
+    juce::String                             errorMessage;
+    juce::OwnedArray<juce::PluginDescription> descriptions;
+};
+
+//==============================================================================
+class PluginRegistry::ScanWorkerThread final : public juce::Thread
+{
+public:
+    ScanWorkerThread (PluginRegistry& owner,
+                      const juce::FileSearchPath& paths,
+                      bool recursive,
+                      bool forceRescan)
+        : juce::Thread ("PluginScanThread"),
+          registry (owner),
+          extraPaths (paths),
+          recursiveMode (recursive),
+          forceRescanMode (forceRescan) {}
+
+    std::atomic<bool> cancelled { false };
+
+    void run() override
+    {
+        // —— 枚举所有待扫描 .vst3（文件系统遍历，可能较慢，放在后台线程）——
+        // extraPaths 已包含“内置默认目录 + 用户自定义目录”（在消息线程解析）。 
+        juce::StringArray files;
+
+        for (int i = 0; i < extraPaths.getNumPaths(); ++i)
+        {
+            const juce::File dir (extraPaths[i]);
+
+            if (! dir.isDirectory())
+                continue;
+
+            for (const auto& f : vst3scan::VST3Scanner::findVST3Files (dir, recursiveMode))
+            {
+                const auto lib = vst3scan::VST3Scanner::resolveLibraryFile (f);
+
+                if (lib.existsAsFile())
+                    files.addIfNotAlreadyThere (lib.getFullPathName());
+            }
+        }
+
+        {
+            juce::ScopedLock lock (registry.progressLock);
+            registry.progressTotal = files.size();
+            registry.progressCompleted = 0;
+        }
+
+        for (const auto& file : files)
+        {
+            if (threadShouldExit() || cancelled.load (std::memory_order_relaxed))
+                break;
+
+            scanSingleFile (file);
+        }
+
+        registry.scanThreadComplete = true;
+        juce::Logger::writeToLog ("Plugin scan worker finished");
+    }
+
+private:
+    void scanSingleFile (const juce::String& file)
+    {
+        registry.setScanProgressDetail (juce::File (file).getFileName());
+
+        auto result = std::make_unique<PluginRegistry::ScanFileResult>();
+        result->filePath = file;
+
+        auto done = [&]
+        {
+            registry.pushScanResult (std::move (result));
+        };
+
+        const juce::File lib (file);
+
+        // OS / 解压残留（__MACOSX / ._* 等）：直接忽略，不计入报告。
+        if (vst3scan::VST3Scanner::isOsResidueFile (lib))
+        {
+            registry.onScanFileProgressed();
+            return;
+        }
+
+        // bundle 目录无法解析出可加载 DLL。
+        if (! lib.existsAsFile())
+        {
+            result->type = PluginRegistry::ScanFileResult::Type::Failed;
+            result->errorMessage = TRANS ("No loadable .vst3 library found in bundle");
+            done();
+            return;
+        }
+
+        // 黑名单跳过（除非本次为强制全量重扫）。
+        if (! forceRescanMode && PluginBlacklist::getInstance().isBlacklisted (lib.getFullPathName()))
+        {
+            result->type = PluginRegistry::ScanFileResult::Type::Blacklisted;
+            done();
+            return;
+        }
+
+        // 增量跳过：文件未变化且上次成功 → 消息线程从已知列表复用描述。
+        if (! forceRescanMode)
+        {
+            std::lock_guard<std::mutex> metaLock (registry.metadataMutex);
+
+            if (registry.shouldSkipFile (lib))
+            {
+                result->type = PluginRegistry::ScanFileResult::Type::Skipped;
+                done();
+                return;
+            }
+        }
+
+        // 扫描：优先 PluginHost 子进程（进程隔离 + 按完整 CID 枚举，杜绝外壳错位）；
+        // 子进程不可用（exe 缺失 / 崩溃 / 非 Windows）时回退进程内自主扫描器。
+        const auto arch = detectPluginArchitecture (lib);
+        bool ok = false;
+        juce::String error;
+
+       #if JUCE_WINDOWS
+        if (arch != PluginArchitecture::unknown
+            && PluginHostLauncher::getHostExecutableForArchitecture (arch).existsAsFile())
+        {
+            ok = scanPluginViaHost (file, arch, result->descriptions, &cancelled);
+
+            if (ok && result->descriptions.isEmpty())
+                ok = false;
+        }
+       #else
+        juce::ignoreUnused (arch);
+       #endif
+
+        if (! ok)
+        {
+            // 进程内兜底：自定义扫描器（先 setHostContext 再按 CID 枚举）。
+            scanFileWithCustomScanner (lib, result->descriptions, error);
+            ok = ! result->descriptions.isEmpty();
+        }
+
+        if (ok)
+        {
+            result->type = PluginRegistry::ScanFileResult::Type::Success;
+        }
+        else
+        {
+            result->type = PluginRegistry::ScanFileResult::Type::Failed;
+            result->errorMessage = error.isNotEmpty() ? error
+                                                       : TRANS ("No plugin descriptions found");
+        }
+
+        done();
+    }
+
+    PluginRegistry&     registry;
+    juce::FileSearchPath extraPaths;
+    bool                 recursiveMode;
+    bool                 forceRescanMode;
+};
+
+//==============================================================================
 PluginRegistry& PluginRegistry::getInstance()
 {
     static PluginRegistry instance;
@@ -673,6 +860,217 @@ PluginRegistry::PluginRegistry()
     formatManager.addDefaultFormats();
     knownList.setCustomScanner (std::make_unique<ArchFilterScanner> (*this));
     loadList();
+    loadCustomScanPaths();
+}
+
+//==============================================================================
+// 定义在 .cpp 中，以便在 ScanWorkerThread 完整定义之后实例化其析构。
+PluginRegistry::~PluginRegistry()
+{
+    if (scanWorker != nullptr)
+    {
+        scanWorker->signalThreadShouldExit();
+        scanWorker->stopThread (2000);
+    }
+}
+
+//==============================================================================
+void PluginRegistry::setScanProgressDetail (const juce::String& detail)
+{
+    juce::ScopedLock lock (progressLock);
+    progressDetail = detail;
+    currentScanningFile = juce::File (detail).getFullPathName();
+}
+
+//==============================================================================
+void PluginRegistry::pushScanResult (std::unique_ptr<ScanFileResult> result)
+{
+    {
+        std::lock_guard<std::mutex> lock (resultQueueMutex);
+        pendingResults.emplace_back (std::move (result));
+    }
+
+    {
+        juce::ScopedLock plock (progressLock);
+        ++progressCompleted;
+    }
+}
+
+//==============================================================================
+void PluginRegistry::onScanFileProgressed()
+{
+    juce::ScopedLock plock (progressLock);
+    ++progressCompleted;
+}
+
+//==============================================================================
+void PluginRegistry::startAsyncScan (bool recursive, bool forceRescan)
+{
+    if (scanWorker != nullptr && scanWorker->isThreadRunning())
+    {
+        juce::Logger::writeToLog ("Async scan already running; ignoring start request.");
+        return;
+    }
+
+    // 消息线程：开启报告，预记录当前已知标识符以区分新增/更新。
+    beginScanReport();
+
+    scanThreadComplete = false;
+
+    {
+        juce::ScopedLock plock (progressLock);
+        progressTotal = 0;
+        progressCompleted = 0;
+        progressDetail = TRANS ("Enumerating plugin directories");
+        currentScanningFile.clear();
+    }
+
+    // 在消息线程解析本次要扫描的目录集合（默认目录 + 自定义目录），避免后台线程
+    // 与消息线程在读取 customScanPaths 上产生数据竞争。
+    const juce::FileSearchPath pathsToScan = getScanSearchPaths();
+
+    scanWorker = std::make_unique<ScanWorkerThread> (*this, pathsToScan, recursive, forceRescan);
+    scanWorker->startThread();
+    juce::Logger::writeToLog ("Async plugin scan started");
+}
+
+//==============================================================================
+void PluginRegistry::cancelAsyncScan()
+{
+    if (scanWorker == nullptr)
+        return;
+
+    scanWorker->cancelled.store (true, std::memory_order_relaxed);
+    scanWorker->signalThreadShouldExit();
+}
+
+//==============================================================================
+bool PluginRegistry::isScanThreadRunning() const noexcept
+{
+    return scanWorker != nullptr && scanWorker->isThreadRunning();
+}
+
+//==============================================================================
+void PluginRegistry::pumpScanResults()
+{
+    std::deque<std::unique_ptr<ScanFileResult>> batch;
+
+    {
+        std::lock_guard<std::mutex> lock (resultQueueMutex);
+
+        if (pendingResults.empty() && ! scanThreadComplete)
+            return; // 仍在扫描且暂无新结果
+
+        batch.swap (pendingResults);
+    }
+
+    for (auto& r : batch)
+        applyScannedFile (*r);
+
+    // 全部结果已应用且后台线程已结束 → 结束扫描报告。
+    if (scanThreadComplete && scanInProgress)
+    {
+        finishScanReport();
+
+        {
+            juce::ScopedLock plock (progressLock);
+            progressDetail = TRANS ("Ready");
+        }
+    }
+}
+
+//==============================================================================
+void PluginRegistry::applyScannedFile (const ScanFileResult& result)
+{
+    ++lastReport.totalFiles;
+
+    const juce::File file (result.filePath);
+
+    switch (result.type)
+    {
+        case ScanFileResult::Type::Skipped:
+        {
+            // 复用已知列表中的描述，记录为“未变化而跳过”。
+            juce::OwnedArray<juce::PluginDescription> existing;
+
+            for (auto& d : knownList.getTypes())
+                if (d.fileOrIdentifier == result.filePath)
+                    existing.add (std::make_unique<juce::PluginDescription> (d));
+
+            {
+                std::lock_guard<std::mutex> metaLock (metadataMutex);
+                updateScanMetadataForFile (file, true, existing, {});
+            }
+
+            recordScanSuccess (file, existing, true);
+            break;
+        }
+
+        case ScanFileResult::Type::Blacklisted:
+            recordScanBlacklisted (file);
+            break;
+
+        case ScanFileResult::Type::Failed:
+            recordScanFailure (file, result.errorMessage);
+            {
+                juce::OwnedArray<juce::PluginDescription> none;
+                std::lock_guard<std::mutex> metaLock (metadataMutex);
+                updateScanMetadataForFile (file, false, none, result.errorMessage);
+            }
+            break;
+
+        case ScanFileResult::Type::Success:
+        default:
+        {
+            {
+                std::lock_guard<std::mutex> metaLock (metadataMutex);
+                updateScanMetadataForFile (file, true, result.descriptions, {});
+            }
+
+            recordScanSuccess (file, result.descriptions, false);
+            commitDescriptionsForFile (result.filePath, result.descriptions);
+            break;
+        }
+    }
+}
+
+//==============================================================================
+void PluginRegistry::commitDescriptionsForFile (const juce::String& file,
+                                                const juce::OwnedArray<juce::PluginDescription>& descriptions)
+{
+    // 先移除该文件原有的已知条目（避免重复），再写入最新描述。
+    for (auto& d : knownList.getTypes())
+    {
+        if (d.fileOrIdentifier == file)
+            knownList.removeType (d);
+    }
+
+    for (auto* d : descriptions)
+        if (d != nullptr)
+            knownList.addType (*d);
+
+    knownList.sendChangeMessage();
+}
+
+//==============================================================================
+int PluginRegistry::getScanProgressTotal() const noexcept
+{
+    juce::ScopedLock plock (progressLock);
+    return progressTotal;
+}
+
+//==============================================================================
+int PluginRegistry::getScanProgressCompleted() const noexcept
+{
+    juce::ScopedLock plock (progressLock);
+    return progressCompleted;
+}
+
+//==============================================================================
+juce::String PluginRegistry::getScanProgressDetail() const
+{
+    juce::ScopedLock plock (progressLock);
+    return progressDetail;
 }
 
 //==============================================================================
@@ -1006,102 +1404,96 @@ juce::FileSearchPath PluginRegistry::getVST3DefaultSearchPath() const
 }
 
 //==============================================================================
-void PluginRegistry::scanForVST3 (bool recursive)
+juce::FileSearchPath PluginRegistry::getScanSearchPaths() const
 {
-    scanForVST3 (getVST3DefaultSearchPath(), recursive);
-}
+    juce::FileSearchPath paths (getVST3DefaultSearchPath());
 
-//==============================================================================
-void PluginRegistry::scanForVST3 (const juce::FileSearchPath& extraPaths, bool recursive)
-{
-    scanForVST3Internal (extraPaths, recursive, false);
-}
-
-//==============================================================================
-void PluginRegistry::rescanForVST3 (bool recursive)
-{
-    rescanForVST3 (getVST3DefaultSearchPath(), recursive);
-}
-
-//==============================================================================
-void PluginRegistry::rescanForVST3 (const juce::FileSearchPath& extraPaths, bool recursive)
-{
-    scanForVST3Internal (extraPaths, recursive, true);
-}
-
-//==============================================================================
-void PluginRegistry::scanForVST3Internal (const juce::FileSearchPath& extraPaths,
-                                          bool recursive,
-                                          bool forceRescan)
-{
-    juce::AudioPluginFormat* vst3Format = nullptr;
-
-    for (int i = 0; i < formatManager.getNumFormats(); ++i)
+    for (int i = 0; i < customScanPaths.getNumPaths(); ++i)
     {
-        auto* format = formatManager.getFormat (i);
+        const juce::File dir = customScanPaths[i];
+        const juce::String p = dir.getFullPathName();
 
-        if (format != nullptr && format->getName() == juce::VST3PluginFormat::getFormatName())
+        bool already = false;
+
+        for (int j = 0; j < paths.getNumPaths(); ++j)
+            if (paths[j].getFullPathName() == p) { already = true; break; }
+
+        if (! already)
+            paths.add (dir);
+    }
+
+    return paths;
+}
+
+//==============================================================================
+juce::FileSearchPath PluginRegistry::getCustomScanPaths() const
+{
+    return customScanPaths;
+}
+
+//==============================================================================
+void PluginRegistry::addScanPath (const juce::File& dir)
+{
+    if (! dir.isDirectory())
+        return;
+
+    const juce::String path = dir.getFullPathName();
+
+    for (int i = 0; i < customScanPaths.getNumPaths(); ++i)
+        if (customScanPaths[i].getFullPathName() == path)
+            return; // 已存在，避免重复
+
+    customScanPaths.add (dir);
+    saveCustomScanPaths();
+}
+
+//==============================================================================
+void PluginRegistry::removeScanPath (const juce::File& dir)
+{
+    const juce::String path = dir.getFullPathName();
+
+    for (int i = 0; i < customScanPaths.getNumPaths(); ++i)
+    {
+        if (customScanPaths[i].getFullPathName() == path)
         {
-            vst3Format = format;
+            customScanPaths.remove (i);
             break;
         }
     }
 
-    if (vst3Format == nullptr)
-        return;
+    saveCustomScanPaths();
+}
 
-    beginScanReport();
+//==============================================================================
+void PluginRegistry::setCustomScanPaths (const juce::FileSearchPath& paths)
+{
+    customScanPaths = juce::FileSearchPath();
 
-    // 合并默认路径与用户指定的额外路径，保持原有顺序追加。
-    juce::FileSearchPath pathsToScan (getVST3DefaultSearchPath());
-
-    for (int i = 0; i < extraPaths.getNumPaths(); ++i)
-        pathsToScan.add (extraPaths[i]);
-
-    // 自主枚举 .vst3（普通文件 + bundle 目录）：主动过滤其他系统/解压残留
-    // （__MACOSX、AppleDouble ._* 等），并把 bundle 目录解析为实际 DLL，
-    // 替代 JUCE VST3PluginFormat::searchPathsForPlugins（其不做过滤）。
-    juce::StringArray files;
-
-    for (int i = 0; i < pathsToScan.getNumPaths(); ++i)
+    for (int i = 0; i < paths.getNumPaths(); ++i)
     {
-        const juce::File dir (pathsToScan[i]);
+        const juce::File dir = paths[i];
 
-        if (! dir.isDirectory())
-            continue;
-
-        for (const auto& f : vst3scan::VST3Scanner::findVST3Files (dir, recursive))
-        {
-            const auto lib = vst3scan::VST3Scanner::resolveLibraryFile (f);
-
-            if (lib.existsAsFile())
-                files.addIfNotAlreadyThere (lib.getFullPathName());
-        }
+        if (dir.isDirectory())
+            customScanPaths.add (dir);
     }
 
-    for (auto& file : files)
-    {
-        if (forceRescan)
-        {
-            // 强制重新扫描：清除该文件的元数据成功标志，使其不会被跳过。
-            if (metadataStore != nullptr)
-            {
-                ScanMetadataStore::Entry cleared;
-                cleared.filePath = file;
-                cleared.lastScanSuccess = false;
-                metadataStore->updateEntry (cleared);
-            }
-        }
+    saveCustomScanPaths();
+}
 
-        juce::OwnedArray<juce::PluginDescription> typesFound;
-        knownList.scanAndAddFile (file, true, typesFound, *vst3Format);
-    }
+//==============================================================================
+void PluginRegistry::loadCustomScanPaths()
+{
+    customScanPaths = juce::FileSearchPath();
 
-    knownList.scanFinished();
-    finishScanReport();
+    if (auto* props = AppSettings::getInstance().getPropertiesFile())
+        customScanPaths = juce::FileSearchPath (props->getValue ("customVst3ScanPaths"));
+}
 
-    // 本次扫描的重试标志用完即重置，避免影响后续扫描。
-    rescanFailedPlugins = false;
+//==============================================================================
+void PluginRegistry::saveCustomScanPaths() const
+{
+    if (auto* props = AppSettings::getInstance().getPropertiesFile())
+        props->setValue ("customVst3ScanPaths", customScanPaths.toString());
 }
 
 //==============================================================================
