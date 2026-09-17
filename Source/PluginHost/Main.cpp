@@ -17,6 +17,7 @@
 
 #include <JuceHeader.h>
 #include "PluginHostServer.h"
+#include "LookAndFeel/MixerLookAndFeel.h"
 
 #if JUCE_WINDOWS
  #include <windows.h>
@@ -104,13 +105,47 @@ static juce::String getCommandLineParameter (const juce::String& name,
 }
 
 //==============================================================================
+/** 运行期控制循环线程。
+
+    IPC 控制循环（加载插件、处理音频/参数/状态消息）一旦进入会是长时间阻塞
+    （readMessage 阻塞读管道）。若把它放在消息线程上，本进程的 JUCE 分发循环
+    将永远不会运行，插件编辑器窗口就无法被消息泵驱动（不刷新/不及时重绘）。
+    因此运行期模式下控制循环放到独立线程，让消息线程进入 runDispatchLoop
+    驱动编辑器 UI。
+*/
+class PluginHostControlThread final : public juce::Thread
+{
+public:
+    explicit PluginHostControlThread (std::shared_ptr<minixer::PluginHostServer> serverIn)
+        : juce::Thread ("PluginHost IPC Control Loop"),
+          server (std::move (serverIn))
+    {}
+
+    void run() override
+    {
+        const int result = server != nullptr ? server->runRuntimeMode() : 1;
+
+        if (auto* app = juce::JUCEApplicationBase::getInstance())
+            app->setApplicationReturnValue (result);
+
+        // 控制循环结束（收到 Shutdown / 管道断开 / 加载失败）→ 结束消息循环，
+        // 让进程正常退出并回到 PluginHostApplication::shutdown() 清理。
+        if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+            mm->stopDispatchLoop();
+    }
+
+private:
+    std::shared_ptr<minixer::PluginHostServer> server;
+};
+
+//==============================================================================
 class PluginHostApplication  : public juce::JUCEApplicationBase
 {
 public:
     PluginHostApplication() = default;
 
     const juce::String getApplicationName() override { return "Minixer PluginHost"; }
-    const juce::String getApplicationVersion() override { return "0.4.1 Beta"; }
+    const juce::String getApplicationVersion() override { return ProjectInfo::versionString; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
     void initialise (const juce::String&) override
@@ -158,9 +193,19 @@ public:
             return;
         }
 
-        minixer::PluginHostServer server;
+        // 提前触发 JUCE 的 DPI 感知初始化（per-monitor DPI v2）：
+        // 确保后续插件创建/编辑器窗口在明确且一致的 DPI 语义下工作，
+        // 避免编辑器 UI “模糊/只显示一部分”的问题。
+        juce::Desktop::getInstance().getDisplays();
 
-        if (! server.connect (ipcKey, pluginPath, pluginDescB64, maxFrames, numInputs, numOutputs))
+        // 与主程序一致的深色主题：安装 MixerLookAndFeel，使插件编辑器
+        // 窗口的底色与宿主绘制控件和主界面风格统一。
+        lookAndFeel = std::make_unique<minixer::MixerLookAndFeel>();
+        juce::LookAndFeel::setDefaultLookAndFeel (lookAndFeel.get());
+
+        server = std::make_shared<minixer::PluginHostServer>();
+
+        if (! server->connect (ipcKey, pluginPath, pluginDescB64, maxFrames, numInputs, numOutputs))
         {
             juce::Logger::writeToLog ("Failed to connect IPC");
             setApplicationReturnValue (1);
@@ -168,18 +213,37 @@ public:
             return;
         }
 
-        int result = 0;
-
         if (mode == "scan")
-            result = server.runScanMode();
-        else
-            result = server.runRuntimeMode();
+        {
+            // 扫描模式保持同步执行，结果经 IPC 发回后进程随即退出。
+            const int result = server->runScanMode();
+            setApplicationReturnValue (result);
+            quit();
+            return;
+        }
 
-        setApplicationReturnValue (result);
-        quit();
+        // 运行期模式：控制循环运行在后台线程，消息线程进入 runDispatchLoop
+        // 以驱动插件编辑器 UI；initialise() 立即返回（不再阻塞）。
+        controlThread = std::make_unique<PluginHostControlThread> (server);
+        controlThread->startThread();
     }
 
-    void shutdown() override {}
+    void shutdown() override
+    {
+        // 正常退出时控制线程在结束前已调用 stopDispatchLoop；这里兜底等待退出，
+        // 防止进程在控制线程仍在运行时销毁（边界情况为主进程强杀场景）。
+        if (controlThread != nullptr)
+        {
+            controlThread->stopThread (3000);
+            controlThread.reset();
+        }
+
+        server.reset();
+
+        // 编辑器窗口/控件已全部销毁后才能安全卸载 LookAndFeel。
+        juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+        lookAndFeel.reset();
+    }
     void systemRequestedQuit() override { quit(); }
     void anotherInstanceStarted (const juce::String&) override {}
     void suspended() override {}
@@ -187,7 +251,10 @@ public:
     void unhandledException (const std::exception*, const juce::String&, int) override {}
 
 private:
+    std::shared_ptr<minixer::PluginHostServer> server;
+    std::unique_ptr<PluginHostControlThread> controlThread;
     std::unique_ptr<juce::Logger> logOwner;
+    std::unique_ptr<minixer::MixerLookAndFeel> lookAndFeel;
 };
 
 //==============================================================================

@@ -105,7 +105,12 @@ bool WindowsSharedMemoryRegion::openInternal (const juce::String& key,
     if (mapping == nullptr)
         return false;
 
-    address = MapViewOfFile (mapping, access, 0, 0, sz);
+    // 打开侧（子进程）映射整个区域，而不是按本进程推算的尺寸取视图：
+    // 主进程按插件描述通道数（可能为 0/不准确）创建映射，尺寸由主进程决定，
+    // 子进程只有在读到共享内存头部的 numInputChannels/numOutputChannels 后
+    // 才知道真实的缓冲布局；映射整个区域可避免“视图尺寸与主进程映射不一致
+    // → MapViewOfFile 失败或后续指针越界”。
+    address = MapViewOfFile (mapping, access, 0, 0, createNew ? sz : 0);
 
     if (address == nullptr)
     {

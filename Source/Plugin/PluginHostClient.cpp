@@ -12,6 +12,11 @@ namespace minixer
 {
 
 //==============================================================================
+// Init 握手等待子进程加载插件（含 license 校验）完成的最长时间。
+// UI 加载已异步化不阻塞，此值只作为防挂死兜底，因而取较宽松的 120 秒。
+static constexpr int kInitResultTimeoutMs = 120000;
+
+//==============================================================================
 PluginHostClient::PluginHostClient() = default;
 
 PluginHostClient::~PluginHostClient()
@@ -28,8 +33,12 @@ bool PluginHostClient::connect (const juce::String& ipcKey,
     disconnect();
 
     maxFramesPerBlock = maxFrames;
-    numInputChannels = numInputs;
-    numOutputChannels = numOutputs;
+
+    // 共享内存尺寸必须以两侧一致的最小通道数计算：子进程固定按 (2,2) 打开映射，
+    // 而插件描述里扫描得到的通道数可能为 0 / 不准确。这里统一钳到至少 2 通道，
+    // 保证主进程创建的映射 ≥ 子进程打开所需尺寸（MapViewOfFile 不允许超尺寸视图）。
+    numInputChannels  = juce::jmax (2u, numInputs);
+    numOutputChannels = juce::jmax (2u, numOutputs);
 
     sharedMemory = createDefaultSharedMemoryRegion();
 
@@ -108,7 +117,7 @@ bool PluginHostClient::initPlugin (double sampleRate, int bufferSize)
         return false;
 
     juce::MemoryBlock response;
-    if (! readResponse (response, ControlMessageType::InitResult, requestId, 30000))
+    if (! readResponse (response, ControlMessageType::InitResult, requestId, kInitResultTimeoutMs))
         return false;
 
     MessageReader reader (response);

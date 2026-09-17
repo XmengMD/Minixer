@@ -9,10 +9,14 @@
 
 #pragma once
 
+#include <functional>
 #include <JuceHeader.h>
 
 namespace minixer
 {
+
+// 子进程侧插件编辑器所在的独立浮动窗口（定义见 PluginWrapper.cpp）。
+class PluginEditorWindow;
 
 //==============================================================================
 /** 封装单个 VST3 插件实例，隐藏 JUCE AudioPluginInstance 的细节。
@@ -77,14 +81,33 @@ public:
     void hideEditor();
     bool isEditorOpen() const noexcept { return editorWindow != nullptr; }
 
+    /** 设置编辑器窗口被关闭时应执行的处理器（由宿主服务器注入）。
+
+        处理器需要持有对 PluginWrapper 的安全生命周期引用（如 weak_ptr），
+        避免关闭按钮回调期间对象已被销毁。
+    */
+    void setEditorCloseRequestHandler (std::function<void()> handler) noexcept
+    {
+        editorCloseRequested = std::move (handler);
+    }
+
 private:
     //==============================================================================
     void closeEditor();
 
+    /** 确保回退路径的内部缓冲达到指定尺寸（仅在插件通道数超过宿主缓冲时分配）。 */
+    void ensureTempBuffer (int numChannels, int numSamples);
+
     //==============================================================================
     std::unique_ptr<juce::AudioPluginInstance> plugin;
     std::unique_ptr<juce::AudioProcessorEditor> editor;
-    std::unique_ptr<juce::DocumentWindow> editorWindow;
+    std::unique_ptr<PluginEditorWindow> editorWindow;
+
+    // 回退路径用的内部处理缓冲（处理结束按可容纳通道数回拷到输出区）。
+    juce::AudioBuffer<float> tempBuffer;
+
+    // 编辑器窗口关闭请求处理器（由宿主服务器注入）。
+    std::function<void()> editorCloseRequested;
 
     uint32_t currentInputChannels = 2;
     uint32_t currentOutputChannels = 2;

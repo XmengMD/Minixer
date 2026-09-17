@@ -71,7 +71,9 @@ private:
     std::unique_ptr<SharedMemoryRegion> sharedMemory;
     AudioSharedMemoryLayout* audioLayout = nullptr;
 
-    std::unique_ptr<PluginWrapper> wrapper;
+    // 共享指针：编辑器窗口创建/销毁在消息线程完成（callAsync），
+    // 需要在线程间安全持有 wrapper。
+    std::shared_ptr<PluginWrapper> wrapper;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginHostServer)
 };
