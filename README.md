@@ -103,12 +103,11 @@ Minixer/
 
 ## 注意事项
 
-- 程序版本号分散在以下位置，发布前请统一更新：
-  - [CMakeLists.txt](CMakeLists.txt)：`project(VERSION x.y.z)`、`juce_add_gui_app(VERSION x.y.z)`、`juce_add_console_app(VERSION x.y.z)` —— 决定 Windows PE 文件版本信息与 `ProjectInfo::versionString`。
-  - [Source/Components/AboutComponent.cpp](Source/Components/AboutComponent.cpp) —— About 窗口中显示的版本文字（例如 `Version 0.3 Beta`）。
-  - [Source/PluginHost/Main.cpp](Source/PluginHost/Main.cpp) —— PluginHost 子进程返回的版本字符串。
-  - [JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) —— 若仍使用 Projucer 导出工程，需同步更新其中的 `ProjectInfo`。
-- CMake 的 `VERSION` 必须为 `x.y.z` 数字格式；UI 展示字符串可另写为 `0.3 Beta` 等形式。
+- 版本号统一在 [CMakeLists.txt](CMakeLists.txt) 顶部一处维护：
+  - `MINIXER_VERSION_MAJOR / MINIXER_VERSION_MINOR / MINIXER_VERSION_PATCH` —— 数字版本，派生 `MINIXER_VERSION`（`x.y.z`），用于 Windows PE 文件版本与 `ProjectInfo::versionNumber`。
+  - `MINIXER_DISPLAY_VERSION` —— UI / About 展示用版本字符串。
+  - 代码侧（About 窗口、PluginHost 版本）通过编译宏 `MINIXER_DISPLAY_VERSION` / `MINIXER_VERSION_*` 自动取用；若不经 CMake 编译（如 Projucer 导出），[JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) 中保留同值兜底。
+- 发布新版本时只需修改 CMakeLists.txt 顶部的版本段，其余自动同步。
 - 发布时请使用 `--config Release` 构建，否则会产生体积巨大的 Debug 二进制并依赖 `MSVCP140D.dll` 等调试运行库。
 - 32 位 PluginHost 需单独创建 Win32 构建目录（如 `build-x86`），不能在同一 x64 构建目录中生成。
 
@@ -253,12 +252,11 @@ Minixer/
 
 ## Notes
 
-- The version number is defined in several places; update all of them before a release:
-  - [CMakeLists.txt](CMakeLists.txt): `project(VERSION x.y.z)`, `juce_add_gui_app(VERSION x.y.z)`, and `juce_add_console_app(VERSION x.y.z)` — these control the Windows PE file version and `ProjectInfo::versionString`.
-  - [Source/Components/AboutComponent.cpp](Source/Components/AboutComponent.cpp) — the version text shown in the About window (e.g. `Version 0.3 Beta`).
-  - [Source/PluginHost/Main.cpp](Source/PluginHost/Main.cpp) — the version string returned by the PluginHost child process.
-  - [JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) — if you still use Projucer, keep `ProjectInfo` in sync.
-- CMake `VERSION` must be a numeric `x.y.z` string; the UI display string can be written separately as `0.3 Beta`.
+- The version number is maintained in a single place at the top of [CMakeLists.txt](CMakeLists.txt):
+  - `MINIXER_VERSION_MAJOR / MINIXER_VERSION_MINOR / MINIXER_VERSION_PATCH` — numeric version, derives `MINIXER_VERSION` (`x.y.z`) used for the Windows PE file version and `ProjectInfo::versionNumber`.
+  - `MINIXER_DISPLAY_VERSION` — display string used by the UI / About window.
+  - The code side (About window, PluginHost version) picks these up automatically via the compile-time macros `MINIXER_DISPLAY_VERSION` / `MINIXER_VERSION_*`; when not building through CMake (e.g. Projucer export), [JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) keeps a matching fallback.
+- To release a new version, only edit the version block at the top of CMakeLists.txt — everything else updates automatically.
 - Always build with `--config Release` for distribution. Debug builds produce much larger binaries and depend on debug runtime DLLs such as `MSVCP140D.dll`.
 - The 32-bit PluginHost requires a separate Win32 build directory (e.g. `build-x86`); it cannot be produced from an x64 build directory.
 

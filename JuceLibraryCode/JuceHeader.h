@@ -41,7 +41,19 @@ namespace ProjectInfo
 {
     const char* const  projectName    = "Minixer";
     const char* const  companyName    = "";
+    // 版本字符串/版本号统一由 CMake（CMakeLists.txt 顶部）派生并注入宏；
+    // 未通过 CMake 编译（如 Projucer 直接导出）时使用下列兜底值。
+#if defined (MINIXER_DISPLAY_VERSION)
+    const char* const  versionString  = MINIXER_DISPLAY_VERSION;
+#else
     const char* const  versionString  = "0.4.1 Beta";
+#endif
+#if defined (MINIXER_VERSION_MAJOR) && defined (MINIXER_VERSION_MINOR) && defined (MINIXER_VERSION_PATCH)
+    const int          versionNumber  = (MINIXER_VERSION_MAJOR << 16)
+                                        | (MINIXER_VERSION_MINOR << 8)
+                                        | MINIXER_VERSION_PATCH;
+#else
     const int          versionNumber  = 0x40100;
+#endif
 }
 #endif
