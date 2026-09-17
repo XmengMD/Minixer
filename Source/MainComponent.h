@@ -123,6 +123,13 @@ private:
 };
 
 //==============================================================================
+/** 插件异步加载的共享槽位状态（完整定义见 MainComponent.cpp）。
+    后台线程把结果写入槽位，消息线程的定时器统一取回应用；用 shared_ptr 保证
+    即使进程退出时仍有后台任务在途，也不会悬空访问。
+*/
+struct PluginLoadSlot;
+
+//==============================================================================
 /** Minixer 主界面组件。
 
     负责：
@@ -233,10 +240,14 @@ private:
     void showPluginSelectionMenu (int slotIndex);
     void loadPluginIntoSlot (int slotIndex, const juce::PluginDescription& description,
                              const std::optional<PluginSlotState>& stateToRestore = {});
-    void onPluginInstanceCreated (int slotIndex, const juce::PluginDescription& description,
-                                  std::unique_ptr<juce::AudioPluginInstance> instance,
-                                  const juce::String& errorMessage,
-                                  const std::optional<PluginSlotState>& stateToRestore);
+
+    // 异步桥接加载（所有架构均通过 PluginHost 子进程，UI 不再被插件加载/校验阻塞）
+    void startSlotLoad (int slotIndex, const juce::PluginDescription& description,
+                        PluginArchitecture arch, double sampleRate, int bufferSize,
+                        const std::optional<PluginSlotState>& stateToRestore);
+    void cancelSlotLoadsForSlot (int slotIndex);
+    void processSlotLoadResults();
+
     void removePluginFromSlot (int slotIndex, bool rebuildChain);
     void rebuildPluginChain();
     void openPluginEditor (int slotIndex);
@@ -307,6 +318,10 @@ private:
 
     // 每个槽位对应的插件节点
     std::array<juce::AudioProcessorGraph::Node::Ptr, defaultNumPluginSlots> pluginSlotNodes;
+
+    // 插件后台加载线程池（少量并发，UI 线程不参与）
+    std::unique_ptr<juce::ThreadPool> pluginLoaderPool;
+    std::array<std::shared_ptr<PluginLoadSlot>, defaultNumPluginSlots> pluginLoadSlots;
 
     // 每个槽位的持久化状态（用于预设保存/加载）
     std::array<PluginSlotState, defaultNumPluginSlots> slotStates;

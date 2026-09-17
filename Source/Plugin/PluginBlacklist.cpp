@@ -133,6 +133,8 @@ void PluginBlacklist::save() const
 //==============================================================================
 void PluginBlacklist::recordCrash (const juce::String& filePath, int exitCode)
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     BlacklistEntry entry;
 
     if (auto* existing = findEntry (filePath))
@@ -155,6 +157,8 @@ void PluginBlacklist::recordCrash (const juce::String& filePath, int exitCode)
 //==============================================================================
 void PluginBlacklist::recordScanFailure (const juce::String& filePath, const juce::String& reason)
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     BlacklistEntry entry;
 
     if (auto* existing = findEntry (filePath))
@@ -176,6 +180,8 @@ void PluginBlacklist::recordScanFailure (const juce::String& filePath, const juc
 //==============================================================================
 void PluginBlacklist::clearEntry (const juce::String& filePath)
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     for (int i = entries.size(); --i >= 0;)
     {
         if (entries.getReference (i).filePath == filePath)
@@ -190,6 +196,8 @@ void PluginBlacklist::clearEntry (const juce::String& filePath)
 //==============================================================================
 void PluginBlacklist::clearAll()
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     if (entries.isEmpty())
         return;
 
@@ -200,6 +208,8 @@ void PluginBlacklist::clearAll()
 //==============================================================================
 bool PluginBlacklist::isBlacklisted (const juce::String& filePath) const
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     auto* entry = findEntry (filePath);
     return entry != nullptr && entry->shouldSkip();
 }
@@ -207,6 +217,8 @@ bool PluginBlacklist::isBlacklisted (const juce::String& filePath) const
 //==============================================================================
 bool PluginBlacklist::canRetry (const juce::String& filePath) const
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     auto* entry = findEntry (filePath);
     return entry == nullptr || entry->canRetryNow();
 }
@@ -214,12 +226,16 @@ bool PluginBlacklist::canRetry (const juce::String& filePath) const
 //==============================================================================
 juce::Array<BlacklistEntry> PluginBlacklist::getEntries() const
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     return entries;
 }
 
 //==============================================================================
 int PluginBlacklist::getNumEntries() const noexcept
 {
+    std::lock_guard<std::mutex> guard (lock);
+
     return entries.size();
 }
 

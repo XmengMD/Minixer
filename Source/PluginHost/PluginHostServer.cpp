@@ -234,7 +234,20 @@ int PluginHostServer::runRuntimeMode()
 //==============================================================================
 bool PluginHostServer::loadPlugin()
 {
-    wrapper = std::make_unique<PluginWrapper>();
+    wrapper = std::make_shared<PluginWrapper>();
+
+    // 编辑器窗口被用户关闭（原生 X）时，在消息线程销毁编辑器和窗口，
+    // 释放插件 UI 占用的 GPU 资源。用弱引用避免形成 shared_ptr 循环。
+    std::weak_ptr<PluginWrapper> weakWrapper (wrapper);
+
+    wrapper->setEditorCloseRequestHandler ([weakWrapper]()
+    {
+        juce::MessageManager::callAsync ([weakWrapper]()
+        {
+            if (auto activeWrapper = weakWrapper.lock())
+                activeWrapper->hideEditor();
+        });
+    });
 
     juce::String error;
     if (! wrapper->loadFromDescription (pluginDescription, 48000.0,
@@ -313,16 +326,18 @@ bool PluginHostServer::handleControlLoop()
 
             if (wrapper != nullptr)
             {
-                if (wrapper->setChannelLayout (requestedInputs, requestedOutputs, error))
-                {
-                    wrapper->prepareToPlay (static_cast<double> (sampleRateInt),
-                                            static_cast<int> (bufferSize));
-                    success = true;
-                }
-                else
-                {
-                    juce::Logger::writeToLog ("Init: setChannelLayout failed: " + error);
-                }
+                // 布局设置失败不回退：插件保留默认布局继续运行（processBlock
+                // 已按插件实际输入/输出通道适配缓冲），Init 只需 wrapper 存在。
+                // 这样个别不支持请求布局的插件（如仅 mono 的外壳子插件）仍能
+                // 正常出声，而不会导致整条链路由 Init 失败而静音。
+                juce::String layoutError;
+
+                if (! wrapper->setChannelLayout (requestedInputs, requestedOutputs, layoutError))
+                    juce::Logger::writeToLog ("Init: setChannelLayout failed, using plugin default layout: " + layoutError);
+
+                wrapper->prepareToPlay (static_cast<double> (sampleRateInt),
+                                        static_cast<int> (bufferSize));
+                success = true;
             }
             else
             {
@@ -441,19 +456,40 @@ bool PluginHostServer::handleControlLoop()
             uint64_t handleValue = 0;
             reader.readUInt64 (handleValue);
 
-            if (wrapper != nullptr)
+            if (wrapper == nullptr)
+                break;
+
+            // 编辑器窗口创建/销毁必须在消息线程进行（JUCE UI 规范）。
+            // 控制循环运行在后台线程，这里经 callAsync 转投消息线程执行，
+            // 并持有 wrapper 的 shared_ptr 保证生命周期安全。
+            auto wrapperRef = wrapper;
+
+            // 窗口标题：只显示插件自身名称（不含进程名/IPC key 等内部信息）。
+            const auto title = wrapper->getName();
+
+            juce::MessageManager::callAsync ([wrapperRef, title, handleValue]() mutable
             {
-                const auto title = "Minixer PluginHost - " + wrapper->getName()
-                                   + " [" + ipcKey + "]";
-                wrapper->showEditor (title, reinterpret_cast<void*> (static_cast<uintptr_t> (handleValue)));
-            }
+                if (wrapperRef == nullptr)
+                    return;
+
+                wrapperRef->showEditor (title,
+                                        reinterpret_cast<void*> (static_cast<uintptr_t> (handleValue)));
+            });
             break;
         }
 
         case ControlMessageType::HideEditor:
         {
-            if (wrapper != nullptr)
-                wrapper->hideEditor();
+            auto wrapperRef = wrapper;
+
+            if (wrapperRef == nullptr)
+                break;
+
+            juce::MessageManager::callAsync ([wrapperRef]() mutable
+            {
+                if (wrapperRef != nullptr)
+                    wrapperRef->hideEditor();
+            });
             break;
         }
 

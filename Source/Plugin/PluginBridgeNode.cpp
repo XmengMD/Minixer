@@ -15,29 +15,23 @@ namespace minixer
 namespace
 {
 
-juce::AudioChannelSet channelSetFromCount (uint32_t numChannels)
-{
-    switch (numChannels)
-    {
-        case 0:  return juce::AudioChannelSet::disabled();
-        case 1:  return juce::AudioChannelSet::mono();
-        case 2:  return juce::AudioChannelSet::stereo();
-        default: return juce::AudioChannelSet::discreteChannels (static_cast<int> (numChannels));
-    }
-}
+// （桥梁节点现统一按立体声总线构建，见构造函数注释。）
 
 } // anonymous namespace
 
 PluginBridgeNode::PluginBridgeNode (const juce::PluginDescription& description,
                                     PluginArchitecture arch)
     : juce::AudioProcessor (juce::AudioProcessor::BusesProperties()
-                                .withInput  ("Input",  channelSetFromCount (static_cast<uint32_t> (description.numInputChannels)),  true)
-                                .withOutput ("Output", channelSetFromCount (static_cast<uint32_t> (description.numOutputChannels)), true)),
+                                .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+                                .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       pluginDescription (description),
       pluginName (description.name),
       architecture (arch),
-      currentInputChannels (static_cast<uint32_t> (juce::jmax (0, description.numInputChannels))),
-      currentOutputChannels (static_cast<uint32_t> (juce::jmax (0, description.numOutputChannels))),
+      // 音频缓冲按立体声（与本机混音器/子进程 2 通道布局一致）。
+      // 不能使用扫描描述中的通道数：VST3 扫描结果往往为 0/0（外壳与多数插件
+      // 不报告有效通道数），若按 0 构建总线会导致节点无通道、图无法连接而全程无声。
+      currentInputChannels (2),
+      currentOutputChannels (2),
       crashState (std::make_shared<CrashState>())
 {
 }

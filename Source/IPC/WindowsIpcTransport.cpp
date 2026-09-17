@@ -69,7 +69,8 @@ bool WindowsIpcTransport::connect (const juce::String& key)
     if (pipe == INVALID_HANDLE_VALUE)
         return false;
 
-    DWORD mode = PIPE_READMODE_MESSAGE;
+    // 与服务端一致使用字节流读模式（协议自带长度前缀，字节流最稳健）
+    DWORD mode = PIPE_READMODE_BYTE;
     if (! SetNamedPipeHandleState (pipe, &mode, nullptr, nullptr))
     {
         close();
@@ -88,9 +89,12 @@ bool WindowsIpcTransport::accept (const juce::String& key)
     const auto pipeNameStr = makePipeName (key);
     const auto* pipeName = pipeNameStr.toWideCharPointer();
 
+    // 使用字节流模式（PIPE_TYPE_BYTE）而不是消息模式：
+    // 协议本身已带长度前缀，字节流可完全消除“消息边界错位/合并”的隐患，
+    // reads/writes 全部按字节循环累计，任意分片/合并均安全。
     pipe = CreateNamedPipeW (pipeName,
                              PIPE_ACCESS_DUPLEX,
-                             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                              1,
                              64 * 1024,
                              64 * 1024,
@@ -121,13 +125,16 @@ bool WindowsIpcTransport::sendMessage (const juce::MemoryBlock& data)
 
     const uint32_t totalSize = static_cast<uint32_t> (juce::jmin<size_t> (data.getSize(), (std::numeric_limits<uint32_t>::max)()));
 
-    if (! sendExact (&totalSize, sizeof (totalSize)))
-        return false;
+    // 长度头 + 负载合并为一次 WriteFile 写入。字节流模式下边界无意义，
+    // 但对端按“先读 4 字节长度、再读负载”的协议取帧，单次写入可减少系统调用
+    // 并避免协议头与负载之间被其它线程的命令穿插。
+    juce::MemoryBlock frame;
+    frame.append (&totalSize, sizeof (totalSize));
 
     if (totalSize > 0)
-        return sendExact (data.getData(), totalSize);
+        frame.append (data.getData(), totalSize);
 
-    return true;
+    return sendExact (frame.getData(), static_cast<DWORD> (frame.getSize()));
 }
 
 //==============================================================================

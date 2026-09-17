@@ -14,6 +14,8 @@
 
 #include <JuceHeader.h>
 
+#include <mutex>
+
 namespace minixer
 {
 
@@ -96,6 +98,9 @@ private:
 
     //==============================================================================
     juce::Array<BlacklistEntry> entries;
+
+    /** 黑名单会被后台扫描线程（读 isBlacklisted）与消息线程（写）并发访问。 */
+    mutable std::mutex lock;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginBlacklist)
 };
