@@ -253,19 +253,49 @@ void PluginWrapper::processBlock (const float* const* inputChannels,  uint32_t n
                                                static_cast<int> (numSamples));
         outputBuffer.clear();
 
-        const uint32_t minSeed = juce::jmin (static_cast<uint32_t> (pluginInCh),
-                                             numInputChannels, numOutputChannels);
-
-        for (uint32_t ch = 0; ch < minSeed; ++ch)
+        // mono-in 插件：按主流 DAW 插入 mono 效果器的惯例，把立体声输入
+        // 求合成单声道（L+R，0dB 不缩放，与 REAPER/Cakewalk 等一致）再送入
+        // 插件，而不是只取 L 声道、静默丢弃 R 声道内容。
+        if (pluginInCh == 1
+            && numInputChannels >= 2
+            && numOutputChannels >= 1
+            && inputChannels[0] != nullptr
+            && inputChannels[1] != nullptr)
         {
-            if (inputChannels[ch] != nullptr)
-                outputBuffer.copyFrom (static_cast<int> (ch), 0,
-                                       inputChannels[ch],
-                                       static_cast<int> (numSamples));
+            const float* left  = inputChannels[0];
+            const float* right = inputChannels[1];
+            auto* mono = outputBuffer.getWritePointer (0);
+
+            for (uint32_t i = 0; i < numSamples; ++i)
+                mono[i] = left[i] + right[i];
+        }
+        else
+        {
+            const uint32_t minSeed = juce::jmin (static_cast<uint32_t> (pluginInCh),
+                                                 numInputChannels, numOutputChannels);
+
+            for (uint32_t ch = 0; ch < minSeed; ++ch)
+            {
+                if (inputChannels[ch] != nullptr)
+                    outputBuffer.copyFrom (static_cast<int> (ch), 0,
+                                           inputChannels[ch],
+                                           static_cast<int> (numSamples));
+            }
         }
 
         juce::MidiBuffer midi;
         plugin->processBlock (outputBuffer, midi);
+
+        // mono-out 插件：结果只写入其声明的输出通道（通道 0）。为确保最终
+        // 输出同时具有 L/R 两路，把处理结果复制到第二个输出通道，由宿主补全。
+        // stereo-out 插件（pluginOutCh == 2）会自己写满两路，无需处理。
+        if (pluginOutCh == 1 && numOutputChannels >= 2)
+        {
+            jassert (outputBuffer.getNumChannels() >= 2);
+            outputBuffer.copyFrom (1, 0, outputBuffer.getReadPointer (0),
+                                   static_cast<int> (numSamples));
+        }
+
         return;
     }
 

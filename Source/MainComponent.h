@@ -52,6 +52,39 @@ private:
 };
 
 //==============================================================================
+/** 将立体声输入下混为单声道的简单处理器（L+R 求和）。
+
+    用于输出设备为单声道时避免静默丢弃 R 声道（与 MonoToStereoProcessor 对称）。
+*/
+class StereoToMonoProcessor  : public juce::AudioProcessor
+{
+public:
+    StereoToMonoProcessor();
+
+    const juce::String getName() const override { return "Stereo To Mono"; }
+    void prepareToPlay (double /*sampleRate*/, int /*maximumExpectedSamplesPerBlock*/) override {}
+    void releaseResources() override {}
+    void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& /*midiMessages*/) override;
+    double getTailLengthSeconds() const override { return 0.0; }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram (int) override {}
+    const juce::String getProgramName (int) override { return {}; }
+    void changeProgramName (int, const juce::String&) override {}
+    void getStateInformation (juce::MemoryBlock&) override {}
+    void setStateInformation (const void*, int) override {}
+
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+
+private:
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StereoToMonoProcessor)
+};
+
+//==============================================================================
 /** 输入增益微调处理器。 */
 class InputTrimProcessor  : public juce::AudioProcessor
 {
@@ -304,6 +337,9 @@ private:
     /** 当前设备是否为单声道输入。 */
     bool isMonoDevice = false;
 
+    /** 当前设备是否为单声道输出（启用输出通道数为 1）。 */
+    bool isMonoOutputDevice = false;
+
     /** 防止 ensureStereoChannelsIfAvailable() 中 setAudioDeviceSetup 触发递归。 */
     bool isReconfiguringDevice = false;
 
@@ -312,6 +348,7 @@ private:
     juce::AudioProcessorGraph::Node::Ptr inputMeterNode;
     juce::AudioProcessorGraph::Node::Ptr inputTrimNode;
     juce::AudioProcessorGraph::Node::Ptr monoToStereoNode;
+    juce::AudioProcessorGraph::Node::Ptr downMixNode;
     juce::AudioProcessorGraph::Node::Ptr outputMeterNode;
     juce::AudioProcessorGraph::Node::Ptr channelStripNode;
     juce::AudioProcessorGraph::Node::Ptr outputNode;

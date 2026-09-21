@@ -72,6 +72,40 @@ bool MonoToStereoProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 }
 
 //==============================================================================
+StereoToMonoProcessor::StereoToMonoProcessor()
+    : juce::AudioProcessor (juce::AudioProcessor::BusesProperties()
+                                .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+                                .withOutput ("Output", juce::AudioChannelSet::mono(), true))
+{
+}
+
+void StereoToMonoProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& /*midiMessages*/)
+{
+    auto numChannels = buffer.getNumChannels();
+    auto numSamples = buffer.getNumSamples();
+
+    if (numChannels >= 2 && numSamples > 0)
+    {
+        // 立体声下混为单声道：L+R 求和写入通道 0（0dB 不缩放，与子进程
+        // mono-in 插件的求和方式保持一致）。输出总线为 mono，下游只取通道 0。
+        const float* left  = buffer.getReadPointer (0);
+        const float* right = buffer.getReadPointer (1);
+        auto* mono = buffer.getWritePointer (0);
+
+        for (int i = 0; i < numSamples; ++i)
+            mono[i] = left[i] + right[i];
+    }
+}
+
+bool StereoToMonoProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+    // 仅支持 mono 或 stereo 输入 + 单声道输出
+    return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::mono()
+        && (layouts.getMainInputChannelSet() == juce::AudioChannelSet::mono()
+            || layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo());
+}
+
+//==============================================================================
 InputTrimProcessor::InputTrimProcessor()
 {
     // 默认总线：立体声输入/立体声输出
@@ -768,6 +802,10 @@ void MainComponent::updateMonoDeviceState()
 
     if (isMonoDevice)
         monoDeviceLabel.setText (TRANS ("MONO INPUT"), juce::dontSendNotification);
+
+    // 输出侧同理：启用输出通道数为 1 时视为单声道输出，
+    // 需要在图尾做 L+R 下混，避免只取 L 声道。
+    isMonoOutputDevice = (setup.outputChannels.countNumberOfSetBits() == 1);
 }
 
 //==============================================================================
@@ -896,6 +934,8 @@ void MainComponent::setupAudioGraph()
 
     monoToStereoNode = audioGraph->addNode (std::make_unique<MonoToStereoProcessor>());
 
+    downMixNode = audioGraph->addNode (std::make_unique<StereoToMonoProcessor>());
+
     outputMeterNode = audioGraph->addNode (std::make_unique<LevelMeterProcessor> (
         [this] (const LevelMeterProcessor::MeterData& data)
         {
@@ -1000,8 +1040,20 @@ void MainComponent::rebuildPluginChain()
     // 通道条处理 -> 输出电平表
     connectNodes (*audioGraph, channelStripNode, outputMeterNode);
 
-    // 输出电平表 -> 输出
-    connectNodes (*audioGraph, outputMeterNode, outputNode);
+    // 输出设备为单声道时：先做 L+R 下混再送入输出节点，
+    // 避免立体声内容只取 L 声道、静默丢弃 R 声道。
+    if (isMonoOutputDevice)
+    {
+        connectNodes (*audioGraph, outputMeterNode, downMixNode);
+
+        // 输出电平表 -> 下混 -> 输出
+        connectNodes (*audioGraph, downMixNode, outputNode);
+    }
+    else
+    {
+        // 输出电平表 -> 输出
+        connectNodes (*audioGraph, outputMeterNode, outputNode);
+    }
 }
 
 //==============================================================================
