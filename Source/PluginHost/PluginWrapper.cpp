@@ -381,9 +381,24 @@ bool PluginWrapper::hasEditor() const
 //==============================================================================
 void PluginWrapper::showEditor (const juce::String& windowTitle, void* /*parentWindowHandle*/)
 {
-    // 窗口在正常关闭时会被整体销毁，这里只需拦截重复的打开请求。
-    if (editorWindow != nullptr || ! hasEditor())
+    if (! hasEditor())
         return;
+
+    // 窗口已存在时的处理：
+    //  - 仍可见：幂等置顶，不重建，避免闪烁/重复创建；
+    //  - 已失效（典型场景：Buffer Size 变更时插件 view 被重配置破坏，窗口对象
+    //    还在但视觉上已消失）：先销毁旧窗口与编辑器（AudioProcessor 会同步
+    //    清空其内部 activeEditor），再走正常创建路径重建，保证再次点击能恢复。
+    if (editorWindow != nullptr)
+    {
+        if (editorWindow->isVisible())
+        {
+            editorWindow->toFront (true);
+            return;
+        }
+
+        closeEditor();
+    }
 
     editor.reset (plugin->createEditorIfNeeded());
 

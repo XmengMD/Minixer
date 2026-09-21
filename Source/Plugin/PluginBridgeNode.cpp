@@ -74,7 +74,10 @@ bool PluginBridgeNode::initialize (double sampleRate, int bufferSize, juce::Stri
     options.ipcKey           = ipcKey;
     options.mode             = "runtime";
     options.architecture     = architecture;
-    options.maxFramesPerBlock = static_cast<uint32_t> (bufferSize);
+    // 共享音频缓冲按硬上限 kMaxAudioBufferFrames 一次性分配（见 PluginHostClient::connect），
+    // 而非加载时的 bufferSize：之后任何时机（含 ASIO 设备内置 Control Panel 内）
+    // 改变 Buffer Size，都不会让音频线程的拷贝越过共享内存边界。
+    options.maxFramesPerBlock = kMaxAudioBufferFrames;
 
     if (auto xml = pluginDescription.createXml())
         options.pluginDescriptionXmlB64 = juce::Base64::toBase64 (xml->toString ());

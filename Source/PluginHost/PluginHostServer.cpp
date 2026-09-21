@@ -280,6 +280,28 @@ bool PluginHostServer::sendScanError (const juce::String& message)
 }
 
 //==============================================================================
+void PluginHostServer::runOnMessageThreadAndWait (std::function<void()> task)
+{
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        task();
+        return;
+    }
+
+    // 转投消息线程并阻塞等待完成。callAsync 排队执行，消息线程运行完毕后
+    // signal；本线程 wait() 返回前控制循环不会读取下一条消息，保证
+    // ProcessBlock 等后续命令严格排在本次插件操作之后处理。
+    juce::WaitableEvent completion;
+    juce::MessageManager::callAsync ([&completion, task]()
+    {
+        task();
+        completion.signal();
+    });
+
+    completion.wait();
+}
+
+//==============================================================================
 bool PluginHostServer::handleControlLoop()
 {
     if (transport == nullptr || ! transport->isConnected())
@@ -330,13 +352,28 @@ bool PluginHostServer::handleControlLoop()
                 // 已按插件实际输入/输出通道适配缓冲），Init 只需 wrapper 存在。
                 // 这样个别不支持请求布局的插件（如仅 mono 的外壳子插件）仍能
                 // 正常出声，而不会导致整条链路由 Init 失败而静音。
-                juce::String layoutError;
+                //
+                // 插件准备必须在消息线程执行（VST3 规范 + JUCE 包装层强制），
+                // 且与编辑器窗口的创建/绘制串行；本调用会阻塞控制线程直到
+                // 消息线程完成，之后才发送 InitResult。
+                auto wrapperRef = wrapper;
+                const uint32_t maxFrames = maxFramesPerBlock;
 
-                if (! wrapper->setChannelLayout (requestedInputs, requestedOutputs, layoutError))
-                    juce::Logger::writeToLog ("Init: setChannelLayout failed, using plugin default layout: " + layoutError);
+                runOnMessageThreadAndWait ([wrapperRef, requestedInputs, requestedOutputs,
+                                            sampleRateInt, maxFrames]()
+                {
+                    if (wrapperRef == nullptr)
+                        return;
 
-                wrapper->prepareToPlay (static_cast<double> (sampleRateInt),
-                                        static_cast<int> (bufferSize));
+                    juce::String layoutError;
+
+                    if (! wrapperRef->setChannelLayout (requestedInputs, requestedOutputs, layoutError))
+                        juce::Logger::writeToLog ("Init: setChannelLayout failed, using plugin default layout: " + layoutError);
+
+                    wrapperRef->prepareToPlay (static_cast<double> (sampleRateInt),
+                                               static_cast<int> (maxFrames));
+                });
+
                 success = true;
             }
             else
@@ -358,15 +395,34 @@ bool PluginHostServer::handleControlLoop()
             reader.readUInt32 (sampleRateInt);
             reader.readUInt32 (bufferSize);
 
-            if (wrapper != nullptr)
-                wrapper->prepareToPlay (static_cast<double> (sampleRateInt), static_cast<int> (bufferSize));
+            // 与 Init 一致：按共享缓冲硬上限 maxFramesPerBlock 准备插件。
+            // 设备 Buffer Size 每次变更不一定都会先发来 PrepareToPlay（例如在
+            // ASIO 内置 Control Panel 内改动），保持插件内部缓冲始终 ≥ 上限，
+            // 任何 ≤ 上限的块都不会越界。
+            //
+            // 插件准备在消息线程执行：既符合 VST3 规范，也与此前已打开的
+            // 编辑器窗口串行，避免重配置破坏插件 GUI 状态。
+            auto wrapperRef = wrapper;
+            const uint32_t maxFrames = maxFramesPerBlock;
+
+            runOnMessageThreadAndWait ([wrapperRef, sampleRateInt, maxFrames]()
+            {
+                if (wrapperRef != nullptr)
+                    wrapperRef->prepareToPlay (static_cast<double> (sampleRateInt),
+                                               static_cast<int> (maxFrames));
+            });
             break;
         }
 
         case ControlMessageType::ReleaseResources:
         {
-            if (wrapper != nullptr)
-                wrapper->releaseResources();
+            auto wrapperRef = wrapper;
+
+            runOnMessageThreadAndWait ([wrapperRef]()
+            {
+                if (wrapperRef != nullptr)
+                    wrapperRef->releaseResources();
+            });
             break;
         }
 

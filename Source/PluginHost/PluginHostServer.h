@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <functional>
 #include <JuceHeader.h>
 #include "../IPC/IpcTransport.h"
 #include "../IPC/SharedMemoryRegion.h"
@@ -58,6 +59,19 @@ private:
     bool sendResponse (ControlMessageType type, const juce::MemoryBlock& payload, uint64_t requestId);
     bool sendLog (const juce::String& message);
     bool sendError (const juce::String& message);
+
+    /** 在消息线程上运行任务并同步等待其完成。
+
+        VST3 规范要求 IComponent::setupProcessing()/setActive() 等必须在消息
+        线程调用（JUCE VST3 包装层同样强制，见 juce_VST3PluginFormat.cpp 的
+        prepareToPlay 注释）。插件编辑器窗口也由消息线程驱动，因此把插件的
+        准备/释放统一转投消息线程并等待完成：既符合规范，又与编辑器串行，
+        避免重配置时插件 GUI 状态被并发线程破坏（表现为编辑器窗口消失）。
+
+        等待发生在控制线程上：本函数返回前，控制循环不会继续读取下一条
+        消息，从而保证后续 ProcessBlock 一定在本次准备完成后才被处理。
+    */
+    void runOnMessageThreadAndWait (std::function<void()> task);
 
     //==============================================================================
     juce::String ipcKey;
