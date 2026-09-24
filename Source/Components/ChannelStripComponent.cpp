@@ -14,7 +14,7 @@ ChannelStripComponent::ChannelStripComponent (const juce::String& /*channelName*
 
     for (int i = 0; i < defaultNumPluginSlots; ++i)
     {
-        auto slot = std::make_unique<PluginSlotComponent> (i);
+        auto slot = std::make_unique<PluginSlotComponent> (i, defaultNumPluginSlots);
         slot->addListener (this);
         addAndMakeVisible (*slot);
         pluginSlots.push_back (std::move (slot));
@@ -62,6 +62,13 @@ void ChannelStripComponent::setPluginSlotInfo (int slotIndex, const juce::String
 {
     if (juce::isPositiveAndBelow (slotIndex, pluginSlots.size()))
         pluginSlots[static_cast<size_t> (slotIndex)]->setPluginInfo (pluginName, isBypassed);
+}
+
+//==============================================================================
+void ChannelStripComponent::setPluginSlotBusyState (int slotIndex, PluginSlotBusyState busyState, const juce::String& busyPluginName)
+{
+    if (juce::isPositiveAndBelow (slotIndex, pluginSlots.size()))
+        pluginSlots[static_cast<size_t> (slotIndex)]->setPluginBusyState (busyState, busyPluginName);
 }
 
 //==============================================================================
@@ -164,6 +171,12 @@ void ChannelStripComponent::pluginSlotMoveRequested (int fromSlotIndex, int toSl
 }
 
 //==============================================================================
+void ChannelStripComponent::pluginSlotLoadCancelRequested (int slotIndex)
+{
+    listeners.call ([slotIndex] (Listener& l) { l.pluginSlotLoadCancelRequested (slotIndex); });
+}
+
+//==============================================================================
 int ChannelStripComponent::getFocusedPluginSlotIndex() const
 {
     for (size_t i = 0; i < pluginSlots.size(); ++i)
@@ -231,6 +244,10 @@ bool ChannelStripComponent::isInterestedInDragSource (const SourceDetails& dragS
 
     auto* slotComp = dynamic_cast<PluginSlotComponent*> (sourceComp);
     if (slotComp == nullptr)
+        return false;
+
+    // 空槽与进行中的槽位没有可移动的插件
+    if (slotComp->isBusy() || ! slotComp->hasPlugin())
         return false;
 
     if (! dragSourceDetails.description.isInt())

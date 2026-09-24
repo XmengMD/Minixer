@@ -10,8 +10,9 @@ namespace
 }
 
 //==============================================================================
-PluginSlotComponent::PluginSlotComponent (int index)
-    : slotIndex (index)
+PluginSlotComponent::PluginSlotComponent (int index, int totalSlots)
+    : slotIndex (index),
+      totalNumSlots (juce::jmax (1, totalSlots))
 {
     setWantsKeyboardFocus (true);
 
@@ -27,7 +28,7 @@ PluginSlotComponent::PluginSlotComponent (int index)
     bypassButton.addListener (this);
     addAndMakeVisible (bypassButton);
 
-    // 右侧操作按钮：空槽为 "+"（加载），有插件为 "X"（删除）
+    // 右侧操作按钮：空槽为 "+"（加载），有插件为 "X"（删除），加载中为 "X"（取消）
     actionButton.setTooltip (TRANS("Load or remove this plugin"));
     actionButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
     actionButton.setLookAndFeel (&getLookAndFeel());
@@ -43,21 +44,67 @@ void PluginSlotComponent::setPluginInfo (const juce::String& name, bool isBypass
     pluginName = name;
     bypassed = isBypassed;
 
-    if (pluginName.isEmpty())
+    updateDisplay();
+}
+
+//==============================================================================
+void PluginSlotComponent::setPluginBusyState (PluginSlotBusyState newState, const juce::String& name)
+{
+    if (busyState == newState && busyPluginName == name)
+        return;
+
+    busyState = newState;
+    busyPluginName = newState == PluginSlotBusyState::none ? juce::String() : name;
+
+    updateDisplay();
+}
+
+//==============================================================================
+void PluginSlotComponent::updateDisplay()
+{
+    const auto prefix = juce::String (slotIndex + 1) + ": ";
+
+    if (busyState == PluginSlotBusyState::loading)
     {
-        slotButton.setButtonText (juce::String (slotIndex + 1) + ": " + TRANS("Empty"));
+        // 加载中：显示目标插件名，屏蔽旁通，右侧按钮改为取消
+        slotButton.setButtonText (busyPluginName.isNotEmpty()
+                                      ? prefix + TRANS ("Loading") + " " + busyPluginName + "..."
+                                      : prefix + TRANS ("Loading") + "...");
+        bypassButton.setBypassState (bypassed);
+        bypassButton.setEnabled (false);
+        actionButton.setButtonText ("X");
+        actionButton.setEnabled (true);
+        actionButton.setTooltip (TRANS ("Cancel loading"));
+    }
+    else if (busyState == PluginSlotBusyState::removing)
+    {
+        // 卸载中：等待 PluginHost 子进程退出，不可取消
+        slotButton.setButtonText (busyPluginName.isNotEmpty()
+                                      ? prefix + TRANS ("Removing") + " " + busyPluginName + "..."
+                                      : prefix + TRANS ("Removing") + "...");
+        bypassButton.setBypassState (false);
+        bypassButton.setEnabled (false);
+        actionButton.setButtonText ({});
+        actionButton.setEnabled (false);
+        actionButton.setTooltip (TRANS ("Removing this plugin"));
+    }
+    else if (pluginName.isEmpty())
+    {
+        slotButton.setButtonText (prefix + TRANS ("Empty"));
         bypassButton.setBypassState (false);
         bypassButton.setEnabled (false);
         actionButton.setButtonText ("+");
-        actionButton.setTooltip (TRANS("Load plugin"));
+        actionButton.setEnabled (true);
+        actionButton.setTooltip (TRANS ("Load plugin"));
     }
     else
     {
-        slotButton.setButtonText (juce::String (slotIndex + 1) + ": " + pluginName);
+        slotButton.setButtonText (prefix + pluginName);
         bypassButton.setBypassState (bypassed);
         bypassButton.setEnabled (true);
         actionButton.setButtonText ("X");
-        actionButton.setTooltip (TRANS("Remove this plugin"));
+        actionButton.setEnabled (true);
+        actionButton.setTooltip (TRANS ("Remove this plugin"));
     }
 
     repaint();
@@ -75,7 +122,16 @@ void PluginSlotComponent::paint (juce::Graphics& g)
     g.setColour (MixerLookAndFeel::getBorderColour());
     g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
 
-    if (bypassed && pluginName.isNotEmpty())
+    if (isBusy())
+    {
+        // 进行中（加载/卸载）：淡蓝底 + 强调色描边，与普通状态区分
+        g.setColour (MixerLookAndFeel::getAccentColour().withAlpha (0.15f));
+        g.fillRoundedRectangle (bounds, 4.0f);
+
+        g.setColour (MixerLookAndFeel::getAccentColour().withAlpha (0.85f));
+        g.drawRoundedRectangle (bounds, 4.0f, 1.5f);
+    }
+    else if (bypassed && pluginName.isNotEmpty())
     {
         g.setColour (juce::Colours::black.withAlpha (0.3f));
         g.fillRoundedRectangle (bounds, 4.0f);
@@ -114,6 +170,16 @@ void PluginSlotComponent::buttonClicked (juce::Button* button)
     // 点击子按钮时把焦点归到槽位，保证键盘导航和“当前焦点槽位”判断一致。
     grabKeyboardFocus();
 
+    if (isBusy())
+    {
+        // 加载中只保留“取消加载”；卸载中不可取消，任何按钮都不响应，
+        // 避免重复发起加载、误删正在卸载的槽位
+        if (button == &actionButton && isLoading())
+            listeners.call ([this] (Listener& l) { l.pluginSlotLoadCancelRequested (slotIndex); });
+
+        return;
+    }
+
     if (button == &bypassButton)
     {
         if (pluginName.isNotEmpty())
@@ -150,6 +216,10 @@ void PluginSlotComponent::mouseDrag (const juce::MouseEvent& event)
     if (isDragging || mouseDownHitArea != HitArea::slot)
         return;
 
+    // 空槽与进行中的槽位没有可移动的插件
+    if (isBusy() || pluginName.isEmpty())
+        return;
+
     if (event.getPosition().getDistanceFrom (mouseDownPos) >= dragThresholdPixels)
     {
         if (auto* dragContainer = juce::DragAndDropContainer::findParentDragContainerFor (this))
@@ -163,7 +233,7 @@ void PluginSlotComponent::mouseDrag (const juce::MouseEvent& event)
 //==============================================================================
 void PluginSlotComponent::mouseUp (const juce::MouseEvent& event)
 {
-    if (isDragging || event.mods.isPopupMenu())
+    if (isDragging || event.mods.isPopupMenu() || isBusy())
         return;
 
     auto hitArea = getHitArea (event.getPosition());
@@ -175,6 +245,9 @@ void PluginSlotComponent::mouseUp (const juce::MouseEvent& event)
 //==============================================================================
 void PluginSlotComponent::mouseDoubleClick (const juce::MouseEvent& event)
 {
+    if (isBusy())
+        return;
+
     if (getHitArea (event.getPosition()) == HitArea::slot && pluginName.isEmpty())
         listeners.call ([this] (Listener& l) { l.pluginSlotClicked (slotIndex); });
 }
@@ -191,7 +264,17 @@ void PluginSlotComponent::showContextMenu (juce::Point<int> clickPos)
 {
     juce::PopupMenu menu;
 
-    if (pluginName.isNotEmpty())
+    if (busyState == PluginSlotBusyState::loading)
+    {
+        // 加载中：只提供取消，避免重复加载
+        menu.addItem (12, TRANS ("Cancel loading"), true, false);
+    }
+    else if (busyState == PluginSlotBusyState::removing)
+    {
+        // 卸载中：不可取消，仅提示当前状态，避免误操作
+        menu.addItem (13, TRANS ("Removing plugin..."), false, false);
+    }
+    else if (pluginName.isNotEmpty())
     {
         menu.addItem (1, TRANS ("Open plugin editor"), true, false);
         menu.addItem (2, TRANS ("Replace plugin..."), true, false);
@@ -201,7 +284,7 @@ void PluginSlotComponent::showContextMenu (juce::Point<int> clickPos)
         menu.addItem (5, TRANS ("Paste plugin"), true, false);
         menu.addSeparator();
         menu.addItem (7, TRANS ("Move up"), slotIndex > 0, false);
-        menu.addItem (8, TRANS ("Move down"), slotIndex < 11, false);
+        menu.addItem (8, TRANS ("Move down"), slotIndex < totalNumSlots - 1, false);
         menu.addSeparator();
         menu.addItem (6, TRANS ("Delete"), true, false);
     }
@@ -248,6 +331,9 @@ void PluginSlotComponent::showContextMenu (juce::Point<int> clickPos)
             case 10:
                 listeners.call ([this] (Listener& l) { l.pluginSlotClicked (slotIndex); });
                 break;
+            case 12:
+                listeners.call ([this] (Listener& l) { l.pluginSlotLoadCancelRequested (slotIndex); });
+                break;
             default:
                 break;
         }
@@ -257,7 +343,8 @@ void PluginSlotComponent::showContextMenu (juce::Point<int> clickPos)
 //==============================================================================
 void PluginSlotComponent::setBypassed (bool shouldBypass)
 {
-    if (pluginName.isEmpty() || bypassed == shouldBypass)
+    // 进行中（加载/卸载）不接受旁通变更，避免与最终状态冲突
+    if (isBusy() || pluginName.isEmpty() || bypassed == shouldBypass)
         return;
 
     bypassed = shouldBypass;

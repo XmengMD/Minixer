@@ -52,6 +52,39 @@ private:
 };
 
 //==============================================================================
+/** 将立体声输入下混为单声道的简单处理器（L+R 求和）。
+
+    用于输出设备为单声道时避免静默丢弃 R 声道（与 MonoToStereoProcessor 对称）。
+*/
+class StereoToMonoProcessor  : public juce::AudioProcessor
+{
+public:
+    StereoToMonoProcessor();
+
+    const juce::String getName() const override { return "Stereo To Mono"; }
+    void prepareToPlay (double /*sampleRate*/, int /*maximumExpectedSamplesPerBlock*/) override {}
+    void releaseResources() override {}
+    void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& /*midiMessages*/) override;
+    double getTailLengthSeconds() const override { return 0.0; }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram (int) override {}
+    const juce::String getProgramName (int) override { return {}; }
+    void changeProgramName (int, const juce::String&) override {}
+    void getStateInformation (juce::MemoryBlock&) override {}
+    void setStateInformation (const void*, int) override {}
+
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+
+private:
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StereoToMonoProcessor)
+};
+
+//==============================================================================
 /** 输入增益微调处理器。 */
 class InputTrimProcessor  : public juce::AudioProcessor
 {
@@ -183,6 +216,7 @@ public:
     void pluginSlotCopyRequested (int slotIndex) override;
     void pluginSlotPasteRequested (int slotIndex) override;
     void pluginSlotMoveRequested (int fromSlotIndex, int toSlotIndex) override;
+    void pluginSlotLoadCancelRequested (int slotIndex) override;
 
     //==============================================================================
     // PresetBarComponent::Listener
@@ -242,11 +276,27 @@ private:
                              const std::optional<PluginSlotState>& stateToRestore = {});
 
     // 异步桥接加载（所有架构均通过 PluginHost 子进程，UI 不再被插件加载/校验阻塞）
-    void startSlotLoad (int slotIndex, const juce::PluginDescription& description,
+    bool startSlotLoad (int slotIndex, const juce::PluginDescription& description,
                         PluginArchitecture arch, double sampleRate, int bufferSize,
                         const std::optional<PluginSlotState>& stateToRestore);
     void cancelSlotLoadsForSlot (int slotIndex);
     void processSlotLoadResults();
+
+    /** 设置槽位进行中状态（同时刷新槽位组件的提示显示与交互屏蔽）。 */
+    void setSlotBusyState (int slotIndex, PluginSlotBusyState busyState, const juce::String& pluginName = {});
+
+    /** 槽位是否处于进行中状态（加载中 / 卸载中）。 */
+    bool isSlotBusy (int slotIndex) const noexcept;
+
+    /** 从音频图中摘除指定槽位当前的插件节点并返回其引用（调用方决定销毁时机）。
+
+        摘除本身很快；节点析构时会把其子进程交给 PluginHostProcessReaper 在后台
+        等待退出，因此无论谁在哪个线程析构都不会阻塞。
+    */
+    juce::AudioProcessorGraph::Node::Ptr detachSlotNode (int slotIndex);
+
+    /** 槽位插件子进程完全退出后（消息线程）解除“卸载中”状态。 */
+    void onSlotNodeFullyShutDown (int slotIndex);
 
     void removePluginFromSlot (int slotIndex, bool rebuildChain);
     void rebuildPluginChain();
@@ -304,6 +354,9 @@ private:
     /** 当前设备是否为单声道输入。 */
     bool isMonoDevice = false;
 
+    /** 当前设备是否为单声道输出（启用输出通道数为 1）。 */
+    bool isMonoOutputDevice = false;
+
     /** 防止 ensureStereoChannelsIfAvailable() 中 setAudioDeviceSetup 触发递归。 */
     bool isReconfiguringDevice = false;
 
@@ -312,6 +365,7 @@ private:
     juce::AudioProcessorGraph::Node::Ptr inputMeterNode;
     juce::AudioProcessorGraph::Node::Ptr inputTrimNode;
     juce::AudioProcessorGraph::Node::Ptr monoToStereoNode;
+    juce::AudioProcessorGraph::Node::Ptr downMixNode;
     juce::AudioProcessorGraph::Node::Ptr outputMeterNode;
     juce::AudioProcessorGraph::Node::Ptr channelStripNode;
     juce::AudioProcessorGraph::Node::Ptr outputNode;
@@ -321,10 +375,19 @@ private:
 
     // 插件后台加载线程池（少量并发，UI 线程不参与）
     std::unique_ptr<juce::ThreadPool> pluginLoaderPool;
+
     std::array<std::shared_ptr<PluginLoadSlot>, defaultNumPluginSlots> pluginLoadSlots;
 
     // 每个槽位的持久化状态（用于预设保存/加载）
     std::array<PluginSlotState, defaultNumPluginSlots> slotStates;
+
+    // 每个槽位的进行中状态与目标插件名（消息线程维护，用于槽位状态显示与交互屏蔽）
+    std::array<PluginSlotBusyState, defaultNumPluginSlots> slotBusyState {};
+    std::array<juce::String, defaultNumPluginSlots> slotBusyPluginName;
+
+    // 该槽位的卸载是否由用户直接发起：卸载完成后据此回写状态栏
+    //（预设批量清空不置位，避免刷屏覆盖“Loaded ...”提示）
+    std::array<bool, defaultNumPluginSlots> slotRemovalStatusPending {};
 
     // 已打开的插件编辑器窗口
     std::vector<std::unique_ptr<PluginEditorWindow>> pluginEditorWindows;

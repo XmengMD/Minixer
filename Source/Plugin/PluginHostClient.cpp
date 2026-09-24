@@ -159,17 +159,27 @@ bool PluginHostClient::processBlock (int numSamples)
         return false;
 
     // 等待子进程完成：pluginWriteSeq 等于 currentSeq 表示处理完成。
-    const auto timeout = juce::Time::getCurrentTime() + juce::RelativeTime::milliseconds (5000);
+    //
+    // 这是音频实时线程：旧实现每块最长 Thread::sleep 累计 5 秒，设备重启时
+    // 消息线程的 setAudioDeviceSetup（停止设备）会同步等待本回调返回，从而
+    // 长时间卡死界面造成"无响应"。因此改为有界自旋：
+    //  - 正常插件由子进程控制线程亚毫秒级完成，循环体通常一次都不执行；
+    //  - 仅在子进程真正挂起/失联时才耗尽 1000ms 上限，且随后桥节点会立即
+    //    终止子进程（handleProcessFailure），后续块的 WriteFile 快速失败，
+    //    不会反复等待。
+    constexpr int kProcessBlockWaitMs = 1000;
+    const double waitStartMs = juce::Time::getMillisecondCounterHiRes();
 
     while (audioLayout->pluginWriteSeq.load (std::memory_order_acquire) != currentSeq)
     {
-        if (juce::Time::getCurrentTime() > timeout)
+        if (juce::Time::getMillisecondCounterHiRes() - waitStartMs > kProcessBlockWaitMs)
         {
             lastError = "PluginHost process block timeout";
             return false;
         }
 
-        juce::Thread::sleep (1);
+        // 不用 Thread::sleep：实时线程上避免任何 OS 级睡眠带来的抖动。
+        juce::Thread::yield();
     }
 
     return true;
@@ -184,12 +194,18 @@ void PluginHostClient::writeInput (const juce::AudioBuffer<float>& inputBuffer, 
     const auto inputChans = static_cast<uint32_t> (inputBuffer.getNumChannels());
     const auto chansToWrite = juce::jmin (numInputChannels, inputChans);
 
+    // 钳制到共享缓冲容量（连接时按硬上限 kMaxAudioBufferFrames 分配）。
+    // 设备 Buffer Size 在运行期发生改动后，实际块大小必须 ≤ 该上限，否则
+    // 循此拷贝会越过映射边界造成访问冲突（旧实现即因此随机崩溃）。
+    const auto framesToCopy = static_cast<uint32_t> (juce::jmin (numSamples,
+                                                                 static_cast<int> (maxFramesPerBlock)));
+
     for (uint32_t ch = 0; ch < chansToWrite; ++ch)
     {
         auto* dst = audioLayout->getInputChannelData (ch, maxFramesPerBlock,
                                                        numInputChannels, numOutputChannels);
         std::memcpy (dst, inputBuffer.getReadPointer (static_cast<int> (ch)),
-                     static_cast<size_t> (numSamples) * sizeof (float));
+                     static_cast<size_t> (framesToCopy) * sizeof (float));
     }
 }
 
@@ -202,13 +218,18 @@ void PluginHostClient::readOutput (juce::AudioBuffer<float>& outputBuffer, int n
     const auto outputChans = static_cast<uint32_t> (outputBuffer.getNumChannels());
     const auto chansToRead = juce::jmin (numOutputChannels, outputChans);
 
+    // 与 writeInput 一致：钳制到共享缓冲容量，防止设备 Buffer Size 在运行期
+    // 被改大后从这里越界读出共享映射之外的残留内存。
+    const auto framesToCopy = static_cast<uint32_t> (juce::jmin (numSamples,
+                                                                 static_cast<int> (maxFramesPerBlock)));
+
     for (uint32_t ch = 0; ch < chansToRead; ++ch)
     {
         auto* src = audioLayout->getOutputChannelData (ch, maxFramesPerBlock,
                                                         numInputChannels, numOutputChannels);
         std::memcpy (outputBuffer.getWritePointer (static_cast<int> (ch)),
                      src,
-                     static_cast<size_t> (numSamples) * sizeof (float));
+                     static_cast<size_t> (framesToCopy) * sizeof (float));
     }
 }
 

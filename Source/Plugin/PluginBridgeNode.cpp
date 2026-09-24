@@ -74,7 +74,10 @@ bool PluginBridgeNode::initialize (double sampleRate, int bufferSize, juce::Stri
     options.ipcKey           = ipcKey;
     options.mode             = "runtime";
     options.architecture     = architecture;
-    options.maxFramesPerBlock = static_cast<uint32_t> (bufferSize);
+    // 共享音频缓冲按硬上限 kMaxAudioBufferFrames 一次性分配（见 PluginHostClient::connect），
+    // 而非加载时的 bufferSize：之后任何时机（含 ASIO 设备内置 Control Panel 内）
+    // 改变 Buffer Size，都不会让音频线程的拷贝越过共享内存边界。
+    options.maxFramesPerBlock = kMaxAudioBufferFrames;
 
     if (auto xml = pluginDescription.createXml())
         options.pluginDescriptionXmlB64 = juce::Base64::toBase64 (xml->toString ());
@@ -114,6 +117,12 @@ bool PluginBridgeNode::initialize (double sampleRate, int bufferSize, juce::Stri
 }
 
 //==============================================================================
+void PluginBridgeNode::setShutdownCompletionCallback (std::function<void()> callback)
+{
+    shutdownCompletionCallback = std::move (callback);
+}
+
+//==============================================================================
 void PluginBridgeNode::shutdown()
 {
     isShuttingDown = true;
@@ -130,15 +139,22 @@ void PluginBridgeNode::shutdown()
         client.reset();
     }
 
+    // 2. 子进程的退出（卸载 DLL、释放采样库）可能耗时数秒，且本函数可能在
+    //    AudioProcessorGraph 回收渲染序列时的消息线程上被调用，因此绝不能在
+    //    调用线程上等待：交给后台收割器完成「等待退出 → 超时强杀」。
+    auto completionCallback = std::move (shutdownCompletionCallback);
+    shutdownCompletionCallback = nullptr;
+
     if (launcher != nullptr)
     {
-        if (launcher->isRunning())
-        {
-            if (! launcher->waitForExit (2000))
-                launcher->terminateProcess();
-        }
-
-        launcher.reset();
+        PluginHostProcessReaper::getInstance().reapAsync (
+            std::shared_ptr<PluginHostLauncher> (std::move (launcher)),
+            std::move (completionCallback));
+    }
+    else if (completionCallback != nullptr)
+    {
+        // 没有子进程可等待：立即回调，避免槽位一直停留在“卸载中”
+        juce::MessageManager::callAsync (std::move (completionCallback));
     }
 
     initialized = false;

@@ -43,6 +43,7 @@ public:
         virtual void pluginSlotCopyRequested (int slotIndex) = 0;
         virtual void pluginSlotPasteRequested (int slotIndex) = 0;
         virtual void pluginSlotMoveRequested (int fromSlotIndex, int toSlotIndex) = 0;
+        virtual void pluginSlotLoadCancelRequested (int slotIndex) = 0;
     };
 
     //==============================================================================
@@ -73,6 +74,9 @@ public:
     //==============================================================================
     void setPluginSlotInfo (int slotIndex, const juce::String& pluginName, bool isBypassed);
 
+    /** 设置槽位的进行中状态（加载中/卸载中显示提示并屏蔽交互）。 */
+    void setPluginSlotBusyState (int slotIndex, PluginSlotBusyState busyState, const juce::String& busyPluginName);
+
     //==============================================================================
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -86,6 +90,7 @@ public:
     void pluginSlotCopyRequested (int slotIndex) override;
     void pluginSlotPasteRequested (int slotIndex) override;
     void pluginSlotMoveRequested (int fromSlotIndex, int toSlotIndex) override;
+    void pluginSlotLoadCancelRequested (int slotIndex) override;
 
     // RotaryKnobComponent::Listener
     void rotaryKnobValueChanged (RotaryKnobComponent* knob) override;
