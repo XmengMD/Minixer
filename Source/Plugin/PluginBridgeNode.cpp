@@ -117,6 +117,12 @@ bool PluginBridgeNode::initialize (double sampleRate, int bufferSize, juce::Stri
 }
 
 //==============================================================================
+void PluginBridgeNode::setShutdownCompletionCallback (std::function<void()> callback)
+{
+    shutdownCompletionCallback = std::move (callback);
+}
+
+//==============================================================================
 void PluginBridgeNode::shutdown()
 {
     isShuttingDown = true;
@@ -133,15 +139,22 @@ void PluginBridgeNode::shutdown()
         client.reset();
     }
 
+    // 2. 子进程的退出（卸载 DLL、释放采样库）可能耗时数秒，且本函数可能在
+    //    AudioProcessorGraph 回收渲染序列时的消息线程上被调用，因此绝不能在
+    //    调用线程上等待：交给后台收割器完成「等待退出 → 超时强杀」。
+    auto completionCallback = std::move (shutdownCompletionCallback);
+    shutdownCompletionCallback = nullptr;
+
     if (launcher != nullptr)
     {
-        if (launcher->isRunning())
-        {
-            if (! launcher->waitForExit (2000))
-                launcher->terminateProcess();
-        }
-
-        launcher.reset();
+        PluginHostProcessReaper::getInstance().reapAsync (
+            std::shared_ptr<PluginHostLauncher> (std::move (launcher)),
+            std::move (completionCallback));
+    }
+    else if (completionCallback != nullptr)
+    {
+        // 没有子进程可等待：立即回调，避免槽位一直停留在“卸载中”
+        juce::MessageManager::callAsync (std::move (completionCallback));
     }
 
     initialized = false;

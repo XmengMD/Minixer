@@ -49,8 +49,19 @@ public:
     /** 启动子进程并建立 IPC。 */
     bool initialize (double sampleRate, int bufferSize, juce::String& errorMessage);
 
-    /** 主动关闭子进程。 */
+    /** 主动关闭子进程。
+
+        注意：本函数不在调用线程上等待子进程退出（大型插件的子进程退出可达数秒，
+        且本函数可能在 AudioProcessorGraph 回收渲染序列时的消息线程上被调用），
+        而是把子进程交给 PluginHostProcessReaper 在后台完成「等待退出 → 超时强杀」。
+    */
     void shutdown();
+
+    /** 设置子进程完全退出后的回调（在消息线程调用）。
+
+        用于槽位在插件卸载完成后解除“卸载中”状态；仅在 shutdown() 时消费一次。
+    */
+    void setShutdownCompletionCallback (std::function<void()> callback);
 
     //==============================================================================
     void addListener (Listener* listener);
@@ -111,6 +122,9 @@ private:
     int currentBufferSize = 512;
     bool initialized = false;
     bool isShuttingDown = false;
+
+    /** 子进程完全退出后在消息线程执行一次的回调（见 setShutdownCompletionCallback）。 */
+    std::function<void()> shutdownCompletionCallback;
 
     struct CrashState { std::atomic<bool> alive { true }; };
 

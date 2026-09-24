@@ -357,10 +357,16 @@ MainComponent::~MainComponent()
     audioDeviceManager.removeAudioCallback (&processorPlayer);
     processorPlayer.setProcessor (nullptr);
 
+    // 销毁插件节点：节点析构会把各自的子进程交给 PluginHostProcessReaper 后台收割，
+    // 不会在消息线程上等待，因此这里不会长时间卡住。
     if (audioGraph != nullptr)
         audioGraph->clear();
 
     audioGraph = nullptr;
+
+    // 等待后台收割完成（最多 2s），并强杀仍未退出的子进程，避免残留孤儿进程。
+    PluginHostProcessReaper::getInstance().drain (2000);
+
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
 }
 
@@ -1094,7 +1100,11 @@ void MainComponent::channelStripParameterChanged()
 //==============================================================================
 void MainComponent::pluginSlotClicked (int slotIndex)
 {
-    if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return;
+
+    // 进行中不响应点击（槽位组件已屏蔽交互，这里作为双保险）
+    if (isSlotBusy (slotIndex))
         return;
 
     if (pluginSlotNodes[slotIndex] != nullptr)
@@ -1110,7 +1120,27 @@ void MainComponent::pluginSlotClicked (int slotIndex)
 //==============================================================================
 void MainComponent::pluginSlotReplaceRequested (int slotIndex)
 {
+    if (isSlotBusy (slotIndex))
+        return;
+
     showPluginSelectionMenu (slotIndex);
+}
+
+//==============================================================================
+void MainComponent::pluginSlotLoadCancelRequested (int slotIndex)
+{
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return;
+
+    // 仅加载中可取消；卸载中已在后台进行且不可逆
+    if (slotBusyState[slotIndex] != PluginSlotBusyState::loading)
+        return;
+
+    // 仅作废在途加载；替换场景下原有插件保持不变并继续工作
+    cancelSlotLoadsForSlot (slotIndex);
+
+    statusLabel.setText (TRANS ("Cancelled loading in slot ") + juce::String (slotIndex + 1),
+                         juce::dontSendNotification);
 }
 
 //==============================================================================
@@ -1132,14 +1162,50 @@ void MainComponent::pluginSlotBypassToggled (int slotIndex, bool shouldBypass)
 //==============================================================================
 void MainComponent::pluginSlotDeleteRequested (int slotIndex)
 {
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return;
+
+    // 卸载中不可重复删除（节点已摘除，子进程仍在后台退出）
+    if (slotBusyState[slotIndex] == PluginSlotBusyState::removing)
+    {
+        statusLabel.setText (TRANS ("Slot ") + juce::String (slotIndex + 1)
+                             + TRANS (" is still unloading"),
+                             juce::dontSendNotification);
+        return;
+    }
+
+    const auto removedName = slotStates[slotIndex].pluginName;
+
+    // 标记为用户直接发起的卸载：子进程退出后据此回写状态栏
+    slotRemovalStatusPending[slotIndex] = true;
+
     removePluginFromSlot (slotIndex, true);
-    statusLabel.setText (juce::String::formatted (TRANS ("Slot %d cleared"), slotIndex + 1),
+
+    // 卸载是异步的（后台等待子进程退出），状态栏先反映“正在卸载”，
+    // 待子进程退出后由 onSlotNodeFullyShutDown() 更新为最终结果。
+    statusLabel.setText (removedName.isNotEmpty()
+                             ? TRANS ("Removing ") + removedName
+                                   + TRANS (" from slot ") + juce::String (slotIndex + 1) + TRANS ("...")
+                             : juce::String::formatted (TRANS ("Slot %d cleared"), slotIndex + 1),
                          juce::dontSendNotification);
 }
 
 //==============================================================================
 void MainComponent::pluginSlotCopyRequested (int slotIndex)
 {
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return;
+
+    if (isSlotBusy (slotIndex))
+    {
+        statusLabel.setText (TRANS ("Slot ") + juce::String (slotIndex + 1)
+                             + (slotBusyState[slotIndex] == PluginSlotBusyState::removing
+                                    ? TRANS (" is still unloading")
+                                    : TRANS (" is still loading")),
+                             juce::dontSendNotification);
+        return;
+    }
+
     auto& slot = channelStrip.getPluginSlot (slotIndex);
 
     if (slot.hasPlugin())
@@ -1153,22 +1219,33 @@ void MainComponent::pluginSlotCopyRequested (int slotIndex)
         statusLabel.setText (TRANS ("Copied ") + copiedSlotState.pluginName + TRANS (" from slot ") + juce::String (slotIndex + 1),
                              juce::dontSendNotification);
     }
+    else
+    {
+        statusLabel.setText (TRANS ("Slot ") + juce::String (slotIndex + 1) + TRANS (" is empty"),
+                             juce::dontSendNotification);
+    }
 }
 
 //==============================================================================
 void MainComponent::pluginSlotPasteRequested (int slotIndex)
 {
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots) || isSlotBusy (slotIndex))
+        return;
+
     auto text = juce::SystemClipboard::getTextFromClipboard();
 
     if (text.startsWith ("MinixerPlugin:"))
     {
-        auto parts = juce::StringArray::fromTokens (text.substring (14), ":", {});
+        // 剪贴板格式为 "<插件名>:<bypass 标记>"；插件名本身可能包含 ':'，
+        // 因此按最后一个 ':' 拆分，避免名称被截断。
+        const auto payload = text.substring (14);
+        const auto separator = payload.lastIndexOfChar (':');
 
-        if (parts.size() >= 1 && parts[0].isNotEmpty())
+        auto name = separator >= 0 ? payload.substring (0, separator) : payload;
+        auto bypassed = separator >= 0 && payload.substring (separator + 1).getIntValue() != 0;
+
+        if (name.isNotEmpty())
         {
-            auto name = parts[0];
-            auto bypassed = parts.size() >= 2 ? (parts[1].getIntValue() != 0) : false;
-
             // 按名称在已扫描列表中查找对应插件并真正加载
             auto& knownList = PluginRegistry::getInstance().getKnownPluginList();
             auto types = knownList.getTypes();
@@ -1259,9 +1336,14 @@ void MainComponent::refreshSlotDisplays()
 //==============================================================================
 void MainComponent::moveSlotContent (int fromIndex, int toIndex)
 {
-    // 移动期间作废两个槽位的在途加载，避免旧加载完成后写回错位槽位
-    cancelSlotLoadsForSlot (fromIndex);
-    cancelSlotLoadsForSlot (toIndex);
+    // 槽位内容整体移位后，落在移位区间内的在途加载会失去位置语义：
+    // 其完成结果会写回错位槽位，覆盖移位后的插件并留下孤立节点。
+    // 因此统一取消区间内所有在途加载（槽位原有插件保持不变）。
+    const auto firstIndex = juce::jmin (fromIndex, toIndex);
+    const auto lastIndex  = juce::jmax (fromIndex, toIndex);
+
+    for (int i = firstIndex; i <= lastIndex; ++i)
+        cancelSlotLoadsForSlot (i);
 
     auto sourceState = slotStates[fromIndex];
     auto sourceNode  = pluginSlotNodes[fromIndex];
@@ -1290,6 +1372,9 @@ void MainComponent::moveSlotContent (int fromIndex, int toIndex)
 //==============================================================================
 void MainComponent::showPluginSelectionMenu (int slotIndex)
 {
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots) || isSlotBusy (slotIndex))
+        return;
+
     auto types = PluginRegistry::getInstance().getKnownPluginList().getTypes();
 
     if (types.isEmpty())
@@ -1327,11 +1412,8 @@ void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescrip
     if (audioGraph == nullptr)
         return;
 
-    // 先移除该槽位已有的插件，并作废该槽位一切在途加载，避免重复占用
-    removePluginFromSlot (slotIndex, false);
-
-    statusLabel.setText (TRANS ("Loading ") + description.name + TRANS ("..."),
-                         juce::dontSendNotification);
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return;
 
     auto sampleRate = audioDeviceManager.getCurrentAudioDevice() != nullptr
                           ? audioDeviceManager.getCurrentAudioDevice()->getCurrentSampleRate()
@@ -1346,16 +1428,25 @@ void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescrip
     // 所有架构（x86 / x64 / 未知）统一通过 PluginHost 子进程桥接加载：
     // 插件 DLL 的加载、实例化、license 校验全部在子进程内完成，与主进程 UI
     // 完全隔离，加载期间主界面保持可交互、音频通路保持连贯。
-    startSlotLoad (slotIndex, description, arch, sampleRate, bufferSize, stateToRestore);
+    //
+    // 注意：此处不再立即移除槽位已有插件。加载期间槽位进入“加载中”状态
+    // （显示提示、屏蔽交互），旧插件继续工作；待新插件在后台就绪后再替换。
+    if (! startSlotLoad (slotIndex, description, arch, sampleRate, bufferSize, stateToRestore))
+        return;
+
+    setSlotBusyState (slotIndex, PluginSlotBusyState::loading, description.name);
+
+    statusLabel.setText (TRANS ("Loading ") + description.name + TRANS ("..."),
+                         juce::dontSendNotification);
 }
 
 //==============================================================================
-void MainComponent::startSlotLoad (int slotIndex, const juce::PluginDescription& description,
+bool MainComponent::startSlotLoad (int slotIndex, const juce::PluginDescription& description,
                                    PluginArchitecture arch, double sampleRate, int bufferSize,
                                    const std::optional<PluginSlotState>& stateToRestore)
 {
-    if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
-        return;
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return false;
 
     auto slot = pluginLoadSlots[slotIndex];
 
@@ -1363,7 +1454,7 @@ void MainComponent::startSlotLoad (int slotIndex, const juce::PluginDescription&
     {
         statusLabel.setText (TRANS ("Failed to load plugin: internal error"),
                              juce::dontSendNotification);
-        return;
+        return false;
     }
 
     uint64_t generation = 0;
@@ -1411,26 +1502,118 @@ void MainComponent::startSlotLoad (int slotIndex, const juce::PluginDescription&
     };
 
     pluginLoaderPool->addJob (std::function<juce::ThreadPoolJob::JobStatus()> (std::move (loadTask)));
+
+    return true;
+}
+
+//==============================================================================
+void MainComponent::setSlotBusyState (int slotIndex, PluginSlotBusyState busyState, const juce::String& pluginName)
+{
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return;
+
+    if (slotBusyState[slotIndex] == busyState
+        && (busyState == PluginSlotBusyState::none || slotBusyPluginName[slotIndex] == pluginName))
+        return;
+
+    slotBusyState[slotIndex] = busyState;
+    slotBusyPluginName[slotIndex] = busyState == PluginSlotBusyState::none ? juce::String() : pluginName;
+
+    channelStrip.setPluginSlotBusyState (slotIndex, busyState, pluginName);
+}
+
+//==============================================================================
+bool MainComponent::isSlotBusy (int slotIndex) const noexcept
+{
+    return juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots)
+           && slotBusyState[slotIndex] != PluginSlotBusyState::none;
+}
+
+//==============================================================================
+juce::AudioProcessorGraph::Node::Ptr MainComponent::detachSlotNode (int slotIndex)
+{
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return {};
+
+    auto node = pluginSlotNodes[slotIndex];
+
+    if (node == nullptr)
+        return {};
+
+    if (auto* bridge = dynamic_cast<PluginBridgeNode*> (node->getProcessor()))
+    {
+        bridge->removeListener (this);
+
+        // 子进程完全退出后回调消息线程，用于解除槽位“卸载中”状态。
+        // 必须在这里设置：节点可能在 AudioProcessorGraph 回收渲染序列时才析构。
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+        bridge->setShutdownCompletionCallback ([safeThis, slotIndex]()
+        {
+            if (safeThis != nullptr)
+                safeThis->onSlotNodeFullyShutDown (slotIndex);
+        });
+    }
+
+    closePluginEditorForProcessor (node->getProcessor());
+    audioGraph->removeNode (node->nodeID);
+    pluginSlotNodes[slotIndex] = nullptr;
+
+    // 返回节点引用：调用方若不再需要应立即释放；节点析构本身不会阻塞
+    //（子进程由 PluginHostProcessReaper 在后台等待退出）
+    return node;
+}
+
+//==============================================================================
+void MainComponent::onSlotNodeFullyShutDown (int slotIndex)
+{
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
+        return;
+
+    // 用户直接发起的卸载：卸载完成后把状态栏从“Removing ...”更新为最终结果
+    const bool reportToStatusBar = slotRemovalStatusPending[slotIndex];
+    slotRemovalStatusPending[slotIndex] = false;
+
+    // 期间槽位可能已被重新加载/重新填充，此时不应再改动其状态
+    if (slotBusyState[slotIndex] != PluginSlotBusyState::removing)
+        return;
+
+    setSlotBusyState (slotIndex, PluginSlotBusyState::none);
+
+    // 仅在槽位确实为空时才刷新为空槽显示（否则保留新填入的插件信息）
+    if (slotStates[slotIndex].pluginIdentifier.isEmpty())
+    {
+        channelStrip.setPluginSlotInfo (slotIndex, {}, false);
+
+        if (reportToStatusBar)
+            statusLabel.setText (juce::String::formatted (TRANS ("Slot %d cleared"), slotIndex + 1),
+                                 juce::dontSendNotification);
+    }
 }
 
 //==============================================================================
 void MainComponent::cancelSlotLoadsForSlot (int slotIndex)
 {
-    if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
         return;
 
     auto slot = pluginLoadSlots[slotIndex];
     if (slot == nullptr)
         return;
 
-    std::lock_guard<std::mutex> lock (slot->mutex);
+    {
+        std::lock_guard<std::mutex> lock (slot->mutex);
 
-    // 递增代数：任何在途加载完成时与当前代数不符，将被丢弃并关闭其子进程
-    ++slot->generation;
+        // 递增代数：任何在途加载完成时与当前代数不符，将被丢弃并关闭其子进程
+        ++slot->generation;
 
-    // 丢弃尚未被消息线程取走的结果
-    slot->outcome.reset();
-    slot->pending = false;
+        // 丢弃尚未被消息线程取走的结果
+        slot->outcome.reset();
+        slot->pending = false;
+    }
+
+    // 仅解除“加载中”状态；卸载中由后台销毁完成后自行解除，不能在此提前清掉
+    if (slotBusyState[slotIndex] == PluginSlotBusyState::loading)
+        setSlotBusyState (slotIndex, PluginSlotBusyState::none);
 }
 
 //==============================================================================
@@ -1470,6 +1653,9 @@ void MainComponent::processSlotLoadResults()
 
         if (! outcome->ok)
         {
+            // 加载失败：解除加载态，槽位原有插件（若有）保持不变
+            setSlotBusyState (slotIndex, PluginSlotBusyState::none);
+
             statusLabel.setText (TRANS ("Failed to load bridged plugin: ") + outcome->error,
                                  juce::dontSendNotification);
             continue;
@@ -1493,10 +1679,18 @@ void MainComponent::processSlotLoadResults()
 
         if (node == nullptr)
         {
+            // 添加失败：解除加载态，槽位原有插件（若有）保持不变
+            setSlotBusyState (slotIndex, PluginSlotBusyState::none);
+
             statusLabel.setText (TRANS ("Failed to add plugin to graph"),
                                  juce::dontSendNotification);
             continue;
         }
+
+        // 替换场景：新插件已就绪，此时才移除槽位中的旧插件节点。
+        // 旧节点的子进程由 PluginHostProcessReaper 在后台收割，不阻塞消息线程。
+        if (auto oldNode = detachSlotNode (slotIndex))
+            oldNode.reset();
 
         pluginSlotNodes[slotIndex] = node;
 
@@ -1517,7 +1711,8 @@ void MainComponent::processSlotLoadResults()
             }
         }
 
-        // 新插件/替换/预设/粘贴加载后，统一按“全局旁通 + 槽位快捷键默认值”刷新 bypass
+        // 先解除加载态，再按“全局旁通 + 槽位快捷键默认值”刷新 bypass（会一并刷新槽位显示）
+        setSlotBusyState (slotIndex, PluginSlotBusyState::none);
         applySlotBypassDefault (slotIndex);
 
         rebuildPluginChain();
@@ -1530,24 +1725,31 @@ void MainComponent::processSlotLoadResults()
 //==============================================================================
 void MainComponent::removePluginFromSlot (int slotIndex, bool rebuildChain)
 {
-    if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
+    if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
         return;
 
     // 作废该槽位一切在途加载（防止旧加载完成后又把节点塞回已移除的槽位）
     cancelSlotLoadsForSlot (slotIndex);
 
-    if (pluginSlotNodes[slotIndex] != nullptr)
-    {
-        if (auto* bridge = dynamic_cast<PluginBridgeNode*> (pluginSlotNodes[slotIndex]->getProcessor()))
-            bridge->removeListener (this);
+    // 记录被移除的插件名用于“卸载中”提示（slotStates 随后会被清空）
+    const auto removedName = slotStates[slotIndex].pluginName;
 
-        closePluginEditorForProcessor (pluginSlotNodes[slotIndex]->getProcessor());
-        audioGraph->removeNode (pluginSlotNodes[slotIndex]->nodeID);
-        pluginSlotNodes[slotIndex] = nullptr;
-    }
+    // 从音频图中摘除节点（很快）；节点析构时其子进程会转交后台收割
+    auto node = detachSlotNode (slotIndex);
 
     slotStates[slotIndex].clear();
-    channelStrip.setPluginSlotInfo (slotIndex, {}, false);
+
+    if (node != nullptr)
+    {
+        // 子进程仍在后台退出：槽位进入“卸载中”状态并屏蔽交互，
+        // 子进程退出后由 onSlotNodeFullyShutDown() 解除。
+        setSlotBusyState (slotIndex, PluginSlotBusyState::removing, removedName);
+        node.reset();
+    }
+    else
+    {
+        channelStrip.setPluginSlotInfo (slotIndex, {}, false);
+    }
 
     if (rebuildChain)
         rebuildPluginChain();

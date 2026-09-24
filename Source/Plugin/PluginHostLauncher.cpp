@@ -8,8 +8,22 @@
 
 #include "PluginHostLauncher.h"
 
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <vector>
+
 namespace minixer
 {
+
+//==============================================================================
+PluginHostLauncher::~PluginHostLauncher()
+{
+    // 进程句柄析构不会结束子进程，这里显式强杀，避免残留孤儿 PluginHost 进程。
+    // 正常情况下（已由收割器等待退出）子进程已不在运行，此处为无操作。
+    if (process.isRunning())
+        process.kill();
+}
 
 //==============================================================================
 juce::File PluginHostLauncher::getHostExecutableForArchitecture (PluginArchitecture arch)
@@ -110,6 +124,75 @@ bool PluginHostLauncher::didCrash() const
         return false;
 
     return getExitCode() != 0;
+}
+
+//==============================================================================
+PluginHostProcessReaper& PluginHostProcessReaper::getInstance()
+{
+    static PluginHostProcessReaper instance;
+    return instance;
+}
+
+//==============================================================================
+void PluginHostProcessReaper::reapAsync (std::shared_ptr<PluginHostLauncher> launcher,
+                                         std::function<void()> onFinished)
+{
+    if (launcher == nullptr)
+    {
+        // 没有子进程可等待：直接回调，避免调用方一直停留在“卸载中”
+        if (onFinished != nullptr)
+            juce::MessageManager::callAsync (std::move (onFinished));
+
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock (mutex);
+        inFlight.push_back (launcher);
+    }
+
+    auto task = [this, launcher, onFinished]() -> juce::ThreadPoolJob::JobStatus
+    {
+        // 后台线程：等待子进程优雅退出，超时则强杀（绝不在消息线程上等待）
+        if (launcher->isRunning())
+        {
+            if (! launcher->waitForExit (exitGraceMs))
+                launcher->terminateProcess();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock (mutex);
+            inFlight.erase (std::remove (inFlight.begin(), inFlight.end(), launcher), inFlight.end());
+        }
+
+        if (onFinished != nullptr)
+            juce::MessageManager::callAsync (onFinished);
+
+        return juce::ThreadPoolJob::jobHasFinished;
+    };
+
+    pool.addJob (std::function<juce::ThreadPoolJob::JobStatus()> (std::move (task)));
+}
+
+//==============================================================================
+void PluginHostProcessReaper::drain (int timeoutMs)
+{
+    // 先给在途收割一点时间让子进程优雅退出
+    pool.removeAllJobs (true, timeoutMs);
+
+    // 兜底：仍未结束的（含已被移出任务队列的）子进程直接强杀，避免残留孤儿进程
+    std::vector<std::shared_ptr<PluginHostLauncher>> remaining;
+
+    {
+        std::lock_guard<std::mutex> lock (mutex);
+        remaining.swap (inFlight);
+    }
+
+    for (auto& launcher : remaining)
+    {
+        if (launcher != nullptr && launcher->isRunning())
+            launcher->terminateProcess();
+    }
 }
 
 } // namespace minixer
