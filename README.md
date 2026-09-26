@@ -1,6 +1,6 @@
 # Minixer (zh-CN)
 
-轻量级单通道独立音频混音台（Standalone Mixer），基于 JUCE 8 / C++17 / Windows 开发。
+轻量级单通道独立音频混音台（Standalone Mixer）。
 
 Minixer 常驻于系统后台，可将硬件麦克风输入经 VST3 插件链（EQ、Compressor、Gate 等）实时处理后，输出至任意 Windows 音频设备（如 VB-Audio Virtual Cable），供 Discord、Zoom、OBS、游戏等第三方软件作为虚拟麦克风输入。
 
@@ -149,7 +149,7 @@ GNU Affero General Public License v3.0 (AGPLv3)
 
 # Minixer (English)
 
-A lightweight single-channel standalone audio mixer, built with JUCE 8 / C++17 / Windows.
+A lightweight single-channel standalone audio mixer.
 
 Minixer runs in the background, taking hardware microphone input through a VST3 plugin chain (EQ, Compressor, Gate, etc.) and routing the processed signal to any Windows audio device (e.g. VB-Audio Virtual Cable). Third-party applications such as Discord, Zoom, OBS, and games can then use it as a virtual microphone input.
 
