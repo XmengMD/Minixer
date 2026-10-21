@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.22)
 # ==============================================================================
 set(MINIXER_VERSION_MAJOR 0)     # x 位
 set(MINIXER_VERSION_MINOR 4)     # y 位
-set(MINIXER_VERSION_PATCH 1)     # z 位
+set(MINIXER_VERSION_PATCH 2)     # z 位
 set(MINIXER_VERSION "${MINIXER_VERSION_MAJOR}.${MINIXER_VERSION_MINOR}.${MINIXER_VERSION_PATCH}")
 set(MINIXER_DISPLAY_VERSION "${MINIXER_VERSION} Beta")   # UI / About 展示用
 

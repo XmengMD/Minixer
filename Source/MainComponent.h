@@ -163,6 +163,14 @@ private:
 struct PluginLoadSlot;
 
 //==============================================================================
+/** 插件加载完成时 bypass 的应用策略。 */
+enum class SlotBypassPolicy
+{
+    existingBehavior,   /**< 保持现有逻辑：仅 holdToggle 模式考虑 defaultBypassed。 */
+    shortcutDefault     /**< 强制应用快捷键的 defaultBypassed（preset 加载使用）。 */
+};
+
+//==============================================================================
 /** Minixer 主界面组件。
 
     负责：
@@ -263,7 +271,10 @@ private:
     void releaseHeldSlotShortcuts();
     void setSlotBypassState (int slotIndex, bool shouldBypass, bool updateStatus = true);
     void applySlotBypassDefault (int slotIndex);
+    void applyShortcutDefaultBypass (int slotIndex, bool updateStatus = true);
     void applyShortcutDefaults();
+    bool hasAnyActiveSlot() const;
+    void resetGlobalBypassIfNoActiveSlots();
 
     // 系统全局插槽快捷键（通过定时轮询检测键盘；MIDI/HID 为事件驱动）
     void pollGlobalSlotShortcuts();
@@ -273,12 +284,14 @@ private:
     // 插件管理
     void showPluginSelectionMenu (int slotIndex);
     void loadPluginIntoSlot (int slotIndex, const juce::PluginDescription& description,
-                             const std::optional<PluginSlotState>& stateToRestore = {});
+                             const std::optional<PluginSlotState>& stateToRestore = {},
+                             SlotBypassPolicy bypassPolicy = SlotBypassPolicy::existingBehavior);
 
     // 异步桥接加载（所有架构均通过 PluginHost 子进程，UI 不再被插件加载/校验阻塞）
     bool startSlotLoad (int slotIndex, const juce::PluginDescription& description,
                         PluginArchitecture arch, double sampleRate, int bufferSize,
-                        const std::optional<PluginSlotState>& stateToRestore);
+                        const std::optional<PluginSlotState>& stateToRestore,
+                        SlotBypassPolicy bypassPolicy);
     void cancelSlotLoadsForSlot (int slotIndex);
     void processSlotLoadResults();
 
@@ -310,7 +323,8 @@ private:
     juce::XmlElement* saveSlotStatesToXml (juce::XmlElement& parent) const;
     void loadSlotStatesFromXml (const juce::XmlElement& parent);
     PluginSlotState getSlotState (int slotIndex) const;
-    void applySlotState (int slotIndex, const PluginSlotState& state);
+    void applySlotState (int slotIndex, const PluginSlotState& state,
+                         SlotBypassPolicy bypassPolicy = SlotBypassPolicy::existingBehavior);
 
     // 插件槽位移动
     void refreshSlotDisplays();

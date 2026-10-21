@@ -17,8 +17,9 @@ namespace minixer
 //==============================================================================
 /** 单个插件槽位的持久化状态。
 
-    用于预设保存/加载：保存插件唯一标识、显示名称、旁通状态以及
+    用于预设保存/加载与剪贴板：保存插件唯一标识、显示名称以及
     AudioProcessor::getStateInformation() 得到二进制状态。
+    bypassed 仅用于运行时状态与剪贴板标记，不写入预设文件。
 */
 struct PluginSlotState
 {
@@ -28,7 +29,7 @@ struct PluginSlotState
     /** 插件显示名称。 */
     juce::String pluginName;
 
-    /** 槽位是否被旁通。 */
+    /** 槽位是否被旁通（仅运行时/剪贴板使用，不写入预设 XML）。 */
     bool bypassed = false;
 
     /** 插件私有状态（Base64 编码后写入 XML）。 */
@@ -52,7 +53,6 @@ struct PluginSlotState
         auto xml = std::make_unique<juce::XmlElement> ("Slot");
         xml->setAttribute ("identifier", pluginIdentifier);
         xml->setAttribute ("name",       pluginName);
-        xml->setAttribute ("bypassed",   bypassed);
 
         if (pluginState.getSize() > 0)
             xml->setAttribute ("state", pluginState.toBase64Encoding());
@@ -71,7 +71,6 @@ struct PluginSlotState
 
         pluginIdentifier = xml.getStringAttribute ("identifier");
         pluginName       = xml.getStringAttribute ("name");
-        bypassed         = xml.getBoolAttribute   ("bypassed", false);
 
         auto stateString = xml.getStringAttribute ("state");
         if (stateString.isNotEmpty())

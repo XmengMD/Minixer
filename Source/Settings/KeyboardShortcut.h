@@ -32,7 +32,7 @@ enum class SlotShortcutMode
 struct SlotShortcut
 {
     ShortcutInputSource inputSource;    /**< 快捷键输入源；isValid() 为 false 表示未设置。 */
-    bool defaultBypassed = false;       /**< 默认是否旁通（长按模式释放后恢复至此状态）。 */
+    bool defaultBypassed = false;       /**< 默认是否旁通（preset 加载完成/关闭全局旁通时应用；长按模式释放后恢复至此状态）。 */
     SlotShortcutMode mode = SlotShortcutMode::cycleToggle;
 
     bool isAssigned() const noexcept { return inputSource.isValid(); }
