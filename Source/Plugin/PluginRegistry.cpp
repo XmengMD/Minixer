@@ -1502,4 +1502,26 @@ std::unique_ptr<juce::PluginDescription> PluginRegistry::findDescriptionForIdent
     return knownList.getTypeForIdentifierString (identifier);
 }
 
+//==============================================================================
+bool PluginRegistry::isPluginEnabled (const juce::String& identifier) const
+{
+    if (identifier.isEmpty())
+        return true;
+
+    if (auto* props = AppSettings::getInstance().getPropertiesFile())
+        return props->getBoolValue ("minixer_pluginEnabled_" + identifier, true);
+
+    return true;
+}
+
+//==============================================================================
+void PluginRegistry::setPluginEnabled (const juce::String& identifier, bool enabled)
+{
+    if (identifier.isEmpty())
+        return;
+
+    if (auto* props = AppSettings::getInstance().getPropertiesFile())
+        props->setValue ("minixer_pluginEnabled_" + identifier, enabled);
+}
+
 } // namespace minixer

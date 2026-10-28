@@ -116,6 +116,17 @@ public:
     std::unique_ptr<juce::PluginDescription> findDescriptionForIdentifier (const juce::String& identifier) const;
 
     //==============================================================================
+    /** 返回插件是否已被启用（插件管理器中的勾选状态；默认启用）。
+
+        启用状态以 PropertiesFile 键 "minixer_pluginEnabled_<identifier>" 持久化，
+        插件管理器与插件选择器共用同一判断，避免两处各自读取导致不一致。
+    */
+    bool isPluginEnabled (const juce::String& identifier) const;
+
+    /** 设置插件的启用状态（持久化于 PropertiesFile）。 */
+    void setPluginEnabled (const juce::String& identifier, bool enabled);
+
+    //==============================================================================
     /** 返回 VST3 格式的默认扫描路径。 */
     juce::FileSearchPath getVST3DefaultSearchPath() const;
 

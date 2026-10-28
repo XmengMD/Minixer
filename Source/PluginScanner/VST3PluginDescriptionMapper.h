@@ -84,8 +84,6 @@ inline void addDescriptionsFromModule (const PluginModuleRecord& rec,
         desc->name               = cr.name.trim();
         desc->descriptiveName    = cr.displayName();          // 显示名优先 Unicode（PClassInfoW）
         desc->pluginFormatName   = "VST3";
-        desc->numInputChannels   = 0;                          // 加载时按插件实际总线重新配置
-        desc->numOutputChannels  = 0;
         desc->version            = cr.version.trim();
 
         const auto sub = cr.subCategories.trim();

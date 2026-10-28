@@ -83,9 +83,7 @@ juce::String serializeDescriptions (const juce::OwnedArray<juce::PluginDescripti
 */
 bool isDescriptionValid (const juce::PluginDescription& desc)
 {
-    return desc.name.isNotEmpty()
-        && desc.numInputChannels >= 0
-        && desc.numOutputChannels >= 0;
+    return desc.name.isNotEmpty();
 }
 
 } // anonymous namespace

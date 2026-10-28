@@ -130,7 +130,7 @@ Minixer 的所有用户数据默认存放在 Windows 用户应用数据目录下
 
 | 文件/目录 | 说明 |
 |---|---|
-| `Minixer.settings` | 应用偏好设置（窗口状态、快捷键、搜索范围等） |
+| `Minixer.settings` | 应用偏好设置（窗口状态、快捷键、搜索范围、插件启用状态等） |
 | `Presets/` | 用户保存的预设文件（`.minixer`） |
 | `PluginList.xml` | 扫描到的 VST3 插件列表 |
 | `PluginBlacklist.json` | 扫描/加载时崩溃或超时的插件黑名单 |
@@ -279,7 +279,7 @@ The directory contains:
 
 | File / Directory | Description |
 |---|---|
-| `Minixer.settings` | Application preferences (window state, shortcuts, search mode, etc.) |
+| `Minixer.settings` | Application preferences (window state, shortcuts, search mode, enabled plugins, etc.) |
 | `Presets/` | User-saved preset files (`.minixer`) |
 | `PluginList.xml` | Scanned VST3 plugin list |
 | `PluginBlacklist.json` | Blacklist of plugins that crashed or timed out during scan/load |

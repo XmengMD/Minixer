@@ -164,11 +164,12 @@ PluginHost64.exe --mode=runtime|scan
 
 扫描模式下子进程执行以下流程：
 
-1. 解析命令行，加载 VST3 文件。
-2. 调用 `AudioPluginFormat::findAllTypesForFile` 获取所有插件描述。
-3. 对描述做基础校验（名称、版本、输入输出通道数）。
-4. 通过 Control Channel 将 `PluginDescription` 列表序列化后返回。
-5. 正常退出，返回码 `0`。
+1. 解析命令行，加载 VST3 文件（`InitDll` + `GetPluginFactory`）。
+2. 先对工厂调用 `IPluginFactory3::setHostContext`，再枚举全部类；插件类一律以完整 128 位 CID 标识，不使用索引或 32 位哈希，以规避外壳插件（WaveShell / IKM 等）在设置宿主上下文后的类索引移位。
+3. 只收录 `Audio Module Class` 类别的类，转换为 `PluginDescription`（名称、厂商、类别、版本等元数据）。自主扫描器不实例化插件，因此描述中不包含输入输出通道数。
+4. 对描述做基础校验（插件名称非空）。
+5. 通过 Control Channel 将 `PluginDescription` 列表序列化后返回。
+6. 正常退出，返回码 `0`。
 
 超时或崩溃由主进程捕获，不污染宿主。
 
@@ -313,7 +314,7 @@ struct AudioSharedMemory
 
 1. 主进程枚举扫描路径下所有 `.vst3` 文件。
 2. 对每个文件启动 PluginHost 子进程（`--mode=scan`）。
-3. 子进程加载并枚举插件描述。
+3. 子进程按 5.4 流程加载并枚举插件描述。
 4. 主进程收集描述或错误信息。
 5. 超时（建议 30 秒）或崩溃则记录失败原因。
 6. 更新 `KnownPluginList` 与扫描报告 UI。
@@ -335,7 +336,7 @@ struct AudioSharedMemory
 
 1. 检查文件是否存在。
 2. 比较修改时间、大小、哈希。
-3. 未变化且上次扫描成功的插件跳过实例化。
+3. 未变化且上次扫描成功的插件跳过重新扫描（复用已保存的描述）。
 4. 新增、修改、上次失败的插件重新扫描。
 
 ### 8.3 扫描报告

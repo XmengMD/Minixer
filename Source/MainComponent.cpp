@@ -1472,8 +1472,24 @@ void MainComponent::showPluginSelectionMenu (int slotIndex)
         return;
     }
 
+    // 与插件管理器保持一致：插件管理器中未勾选启用的插件不出现在选择列表里。
+    juce::Array<juce::PluginDescription> enabledTypes;
+
+    for (const auto& desc : types)
+        if (PluginRegistry::getInstance().isPluginEnabled (desc.createIdentifierString()))
+            enabledTypes.add (desc);
+
+    if (enabledTypes.isEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
+                                                TRANS ("No Enabled Plugins"),
+                                                TRANS ("All scanned plugins are disabled. "
+                                                        "Enable them in the plugin manager."));
+        return;
+    }
+
     auto* selector = new PluginSelectorComponent (
-        std::move (types),
+        std::move (enabledTypes),
         slotStates[slotIndex].pluginIdentifier,
         [this, slotIndex] (juce::PluginDescription desc)
         {
