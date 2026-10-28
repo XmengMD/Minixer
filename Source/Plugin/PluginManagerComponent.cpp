@@ -284,15 +284,6 @@ PluginManagerComponent::PluginManagerComponent()
     optionsButton.onClick = [this] { showOptionsMenu(); };
     addAndMakeVisible (optionsButton);
 
-    rescanFailedPluginsButton.setButtonText (TRANS ("Rescan previously failed plugins"));
-    rescanFailedPluginsButton.setTooltip (TRANS ("When checked, plugins that crashed or failed in "
-                                                 "the last scan will be scanned again."));
-    rescanFailedPluginsButton.onClick = [this]
-    {
-        PluginRegistry::getInstance().setRescanFailedPlugins (rescanFailedPluginsButton.getToggleState());
-    };
-    addAndMakeVisible (rescanFailedPluginsButton);
-
     cancelButton.setButtonText (TRANS ("Cancel"));
     cancelButton.onClick = [this] { cancelScan(); };
     cancelButton.setVisible (false);
@@ -367,7 +358,6 @@ PluginManagerComponent::~PluginManagerComponent()
     table.getHeader().removeListener (this);
     PluginRegistry::getInstance().getKnownPluginList().removeChangeListener (this);
     stopTimer();
-    PluginRegistry::getInstance().setRescanFailedPlugins (false);
 }
 
 //==============================================================================
@@ -389,10 +379,6 @@ void PluginManagerComponent::resized()
     cancelButton.setBounds (toolbar.removeFromLeft (80));
     toolbar.removeFromLeft (gap);
 
-    auto rescanArea = toolbar.removeFromLeft (juce::jmin (220, toolbar.getWidth() / 2));
-    rescanFailedPluginsButton.setBounds (rescanArea);
-
-    toolbar.removeFromLeft (gap);
     filterLabel.setBounds (toolbar.removeFromLeft (50));
     toolbar.removeFromLeft (4);
     filterCriteriaBox.setBounds (toolbar.removeFromLeft (100).reduced (0, 2));
@@ -583,18 +569,31 @@ void PluginManagerComponent::showOptionsMenu()
     if (PluginRegistry::getInstance().isScanThreadRunning())
         return;
 
+    enum MenuIds
+    {
+        idEditScanPaths = 1,
+        idScan,
+        idRescanFailed,
+        idFullRescan,
+        idRemoveSelected,
+        idRemoveAll,
+        idApplyPedal,
+        idDontApplyPedal
+    };
+
     juce::PopupMenu menu;
 
-    menu.addItem (1, TRANS ("Edit scan directories..."));
-    menu.addItem (2, TRANS ("Scan"));
-    menu.addItem (3, TRANS ("Fully rescan"));
+    menu.addItem (idEditScanPaths, TRANS ("Edit scan directories..."));
+    menu.addItem (idScan,         TRANS ("Scan"));
+    menu.addItem (idRescanFailed, TRANS ("Rescan failed plug-ins"));
+    menu.addItem (idFullRescan,   TRANS ("Fully rescan"));
     menu.addSeparator();
 
     const bool anySelected = table.getSelectedRows().size() > 0;
     const bool anyRows     = cachedTypes.size() > 0;
 
-    menu.addItem (4, TRANS ("Remove selected plug-ins"), anySelected);
-    menu.addItem (5, TRANS ("Remove all plug-ins"), anyRows);
+    menu.addItem (idRemoveSelected, TRANS ("Remove selected plug-ins"), anySelected);
+    menu.addItem (idRemoveAll,      TRANS ("Remove all plug-ins"), anyRows);
     menu.addSeparator();
 
     bool applyPedal = true;
@@ -602,8 +601,8 @@ void PluginManagerComponent::showOptionsMenu()
     if (auto* props = AppSettings::getInstance().getPropertiesFile())
         applyPedal = props->getBoolValue ("minixer_applyDeadMansPedal", true);
 
-    menu.addItem (6, TRANS ("Apply dead-man's pedal"), true, applyPedal);
-    menu.addItem (7, TRANS ("Don't apply dead-man's pedal"), true, ! applyPedal);
+    menu.addItem (idApplyPedal,    TRANS ("Apply dead-man's pedal"), true, applyPedal);
+    menu.addItem (idDontApplyPedal, TRANS ("Don't apply dead-man's pedal"), true, ! applyPedal);
 
     // 独立应用中 JUCE 关闭了模态循环，须使用异步菜单 API。
     menu.showMenuAsync (juce::PopupMenu::Options(), [this] (int chosen)
@@ -616,13 +615,23 @@ void PluginManagerComponent::showOptionsMenu()
 
         switch (chosen)
         {
-            case 1: showScanPathsEditor();   break;
-            case 2: PluginRegistry::getInstance().startAsyncScan (true, false); break; // 按已管理目录扫描
-            case 3: startFullRescan();       break;
-            case 4: removeSelectedPlugins(); break;
-            case 5: removeAllPlugins();      break;
-            case 6: setPedal (true);  break;
-            case 7: setPedal (false); break;
+            case idEditScanPaths: showScanPathsEditor(); break;
+            case idScan:
+                PluginRegistry::getInstance().startAsyncScan (true,
+                                                              PluginRegistry::ScanMode::incremental);
+                break;
+            case idRescanFailed:
+                PluginRegistry::getInstance().startAsyncScan (true,
+                                                              PluginRegistry::ScanMode::retryFailed);
+                break;
+            case idFullRescan:
+                PluginRegistry::getInstance().startAsyncScan (true,
+                                                              PluginRegistry::ScanMode::fullRescan);
+                break;
+            case idRemoveSelected:  removeSelectedPlugins(); break;
+            case idRemoveAll:       removeAllPlugins();      break;
+            case idApplyPedal:      setPedal (true);         break;
+            case idDontApplyPedal:  setPedal (false);        break;
             default: break;
         }
     });
@@ -646,12 +655,6 @@ void PluginManagerComponent::showScanPathsEditor()
 
     scanPathsWindow->setVisible (true);
     scanPathsWindow->toFront (true);
-}
-
-//==============================================================================
-void PluginManagerComponent::startFullRescan()
-{
-    PluginRegistry::getInstance().startAsyncScan (true, true);
 }
 
 //==============================================================================
@@ -1025,7 +1028,6 @@ void PluginManagerComponent::timerCallback()
     }
 
     optionsButton.setEnabled             (! scanning);
-    rescanFailedPluginsButton.setEnabled (! scanning);
     filterCriteriaBox.setEnabled         (! scanning);
     filterEditor.setEnabled              (! scanning);
 
@@ -1053,12 +1055,12 @@ juce::String PluginManagerComponent::formatScanReport (const PluginScanReport& r
     juce::String text;
     text << TRANS ("Scan completed") << ":\n\n";
     text << TRANS ("Total files scanned") << ": " << report.totalFiles << "\n";
-    text << TRANS ("Successful") << ": " << report.successCount << "\n";
+    text << TRANS ("Successful files") << ": " << report.successCount << "\n";
     text << TRANS ("New plugins") << ": " << report.newCount << "\n";
     text << TRANS ("Updated plugins") << ": " << report.updatedCount << "\n";
-    text << TRANS ("Skipped (unchanged)") << ": " << report.skippedCount << "\n";
-    text << TRANS ("Skipped (blacklisted)") << ": " << report.blacklistedCount << "\n";
-    text << TRANS ("Failed") << ": " << report.failedCount << "\n";
+    text << TRANS ("Skipped (unchanged files)") << ": " << report.skippedCount << "\n";
+    text << TRANS ("Skipped (blacklisted files)") << ": " << report.blacklistedCount << "\n";
+    text << TRANS ("Failed files") << ": " << report.failedCount << "\n";
 
     if (! report.failedEntries.isEmpty())
     {
@@ -1084,9 +1086,9 @@ juce::String PluginManagerComponent::formatScanReport (const PluginScanReport& r
 
     if (report.blacklistedCount > 0)
     {
-        text << "\n" << TRANS ("Blacklisted plugins skipped") << ": "
+        text << "\n" << TRANS ("Blacklisted files skipped") << ": "
              << report.blacklistedCount << "\n";
-        text << TRANS ("Check \"Rescan previously failed plugins\" to retry them.") << "\n";
+        text << TRANS ("Choose Options > \"Rescan failed plug-ins\" to retry them.") << "\n";
     }
 
     return text;
@@ -1101,7 +1103,6 @@ void PluginManagerComponent::showScanReportIfNeeded()
         return;
 
     PluginRegistry::getInstance().markLastScanReportAsShown();
-    rescanFailedPluginsButton.setToggleState (false, juce::dontSendNotification);
 
     juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
                                             TRANS ("Plugin Scan Report"),

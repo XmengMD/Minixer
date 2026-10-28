@@ -215,6 +215,14 @@ bool PluginBlacklist::isBlacklisted (const juce::String& filePath) const
 }
 
 //==============================================================================
+bool PluginBlacklist::contains (const juce::String& filePath) const
+{
+    std::lock_guard<std::mutex> guard (lock);
+
+    return findEntry (filePath) != nullptr;
+}
+
+//==============================================================================
 bool PluginBlacklist::canRetry (const juce::String& filePath) const
 {
     std::lock_guard<std::mutex> guard (lock);

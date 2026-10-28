@@ -25,12 +25,12 @@ namespace minixer
 struct PluginScanReport
 {
     int totalFiles      = 0; /**< 扫描文件总数。 */
-    int successCount    = 0; /**< 成功扫描数量。 */
-    int newCount        = 0; /**< 新增插件数量。 */
-    int updatedCount    = 0; /**< 更新插件数量。 */
-    int skippedCount      = 0; /**< 未变化而跳过的数量。 */
-    int failedCount       = 0; /**< 失败文件数量。 */
-    int blacklistedCount  = 0; /**< 本次扫描因黑名单而跳过的数量。 */
+    int successCount    = 0; /**< 实际重扫成功的文件数（不含跳过）。 */
+    int newCount        = 0; /**< 新增插件数（按描述条数，仅来自实际重扫的文件）。 */
+    int updatedCount    = 0; /**< 更新插件数（按描述条数，仅来自实际重扫的文件）。 */
+    int skippedCount      = 0; /**< 未变化而跳过的文件数。 */
+    int failedCount       = 0; /**< 失败文件数。 */
+    int blacklistedCount  = 0; /**< 本次扫描因黑名单而跳过的文件数。 */
 
     juce::Time scanStartTime;
     juce::Time scanEndTime;
@@ -76,6 +76,14 @@ public:
     void saveList() const;
 
     //==============================================================================
+    /** 异步扫描模式（插件管理器 Options 菜单的三个入口，语义互不重叠）。 */
+    enum class ScanMode
+    {
+        incremental,   /**< 增量扫描：跳过黑名单与未变化文件。 */
+        retryFailed,   /**< 只重新扫描黑名单中的插件（含永久跳过），其余文件不进入扫描。 */
+        fullRescan     /**< 忽略增量缓存扫描全部文件，并包含黑名单插件重试。 */
+    };
+
     /** 异步扫描 VST3（插件管理器 UI 专用入口）。
 
         在专用后台线程上进行目录枚举，并对每个 .vst3 文件启动 PluginHost 子进程
@@ -85,7 +93,7 @@ public:
 
         扫描目录取 getScanSearchPaths()（内置默认目录 + 用户自定义目录）。
     */
-    void startAsyncScan (bool recursive, bool forceRescan = false);
+    void startAsyncScan (bool recursive, ScanMode mode = ScanMode::incremental);
 
     /** 取消正在进行的异步扫描。在结果队列被清空且线程退出后立即结束扫描报告。 */
     void cancelAsyncScan();
@@ -102,14 +110,6 @@ public:
     int         getScanProgressTotal() const noexcept;
     int         getScanProgressCompleted() const noexcept;
     juce::String getScanProgressDetail() const;   /**< 当前正在扫描的文件名或阶段文本。 */
-
-    //==============================================================================
-    /** 设置下次扫描时是否重新扫描黑名单中“上次出错的插件”。
-        勾选时会同时清除 JUCE KnownPluginList 黑名单、本应用黑名单以及
-        未应用的 dead man's pedal 文件，确保失败插件真正被重新扫描。 */
-    void setRescanFailedPlugins (bool shouldRescan);
-
-    bool getRescanFailedPlugins() const noexcept { return rescanFailedPlugins; }
 
     //==============================================================================
     /** 根据 createIdentifierString() 查找插件描述。 */
@@ -239,7 +239,6 @@ private:
     std::unique_ptr<ScanMetadataStore> metadataStore;
     PluginScanReport                   lastReport;
     bool                               scanInProgress = false;
-    bool                               rescanFailedPlugins = false;
 
     /** 本次扫描前已知的插件标识符集合，用于区分新增与更新。 */
     juce::StringArray                  preScanIdentifiers;

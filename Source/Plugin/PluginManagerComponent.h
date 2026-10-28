@@ -144,7 +144,6 @@ private:
 
     //==============================================================================
     void showOptionsMenu();
-    void startFullRescan();
     void cancelScan();
     void showScanPathsEditor();
     void showRowContextMenu (int rowNumber, juce::Point<int> screenPos);
@@ -210,7 +209,6 @@ private:
 
     //==============================================================================
     juce::TextButton    optionsButton;
-    juce::ToggleButton  rescanFailedPluginsButton;
     juce::TextButton    cancelButton;
     juce::Label         filterLabel;
     juce::ComboBox      filterCriteriaBox;
