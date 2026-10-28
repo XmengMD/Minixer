@@ -1,5 +1,5 @@
 # ==================== 编译产物与 IDE 工程文件 ====================
-# Builds/ 目录由 Projucer 根据 Minixer.jucer 重新生成，且含本机绝对路径，不上传
+# Builds/ 为旧版 Projucer 导出的 IDE 工程目录（已弃用，项目仅使用 CMake），仍忽略以防误上传
 Builds/
 *.exe
 *.dll

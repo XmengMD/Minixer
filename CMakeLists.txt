@@ -29,7 +29,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 #   2. 环境变量 JUCE_DIR
 #   3. 项目根目录附近的常见位置（../JUCE、../../JUCE 等）
 #
-# 设置后即可使用本 CMake 配置，无需再打开 Projucer 重新导出 IDE 工程。
+# 设置后即可直接使用本 CMake 配置构建，不依赖 Projucer 导出的 IDE 工程。
 if(NOT DEFINED JUCE_DIR)
     if(DEFINED ENV{JUCE_DIR})
         file(TO_CMAKE_PATH "$ENV{JUCE_DIR}" JUCE_DIR)
