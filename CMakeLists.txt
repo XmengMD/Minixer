@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.22)
 # ==============================================================================
 set(MINIXER_VERSION_MAJOR 0)     # x 位
 set(MINIXER_VERSION_MINOR 4)     # y 位
-set(MINIXER_VERSION_PATCH 1)     # z 位
+set(MINIXER_VERSION_PATCH 2)     # z 位
 set(MINIXER_VERSION "${MINIXER_VERSION_MAJOR}.${MINIXER_VERSION_MINOR}.${MINIXER_VERSION_PATCH}")
 set(MINIXER_DISPLAY_VERSION "${MINIXER_VERSION} Beta")   # UI / About 展示用
 
@@ -29,7 +29,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 #   2. 环境变量 JUCE_DIR
 #   3. 项目根目录附近的常见位置（../JUCE、../../JUCE 等）
 #
-# 设置后即可使用本 CMake 配置，无需再打开 Projucer 重新导出 IDE 工程。
+# 设置后即可直接使用本 CMake 配置构建，不依赖 Projucer 导出的 IDE 工程。
 if(NOT DEFINED JUCE_DIR)
     if(DEFINED ENV{JUCE_DIR})
         file(TO_CMAKE_PATH "$ENV{JUCE_DIR}" JUCE_DIR)

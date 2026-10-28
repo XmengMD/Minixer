@@ -575,20 +575,13 @@ public:
             return true;
         }
 
-        // 黑名单跳过：除非用户勾选“重新扫描上次出错的插件”，否则跳过黑名单中的插件。
+        // 黑名单跳过：同步扫描路径没有“重试失败插件”入口，黑名单一律跳过。
         if (PluginBlacklist::getInstance().isBlacklisted (libFile.getFullPathName()))
         {
-            if (! registry.rescanFailedPlugins)
-            {
-                juce::Logger::writeToLog ("Skipping blacklisted plugin file: " + fileOrIdentifier);
-                registry.recordScanBlacklisted (libFile);
-                registry.lastScanActivityTime = now;
-                return true;
-            }
-
-            // 用户要求重试：清除该条黑名单记录，本次重新扫描。
-            juce::Logger::writeToLog ("Retrying blacklisted plugin file: " + fileOrIdentifier);
-            PluginBlacklist::getInstance().clearEntry (libFile.getFullPathName());
+            juce::Logger::writeToLog ("Skipping blacklisted plugin file: " + fileOrIdentifier);
+            registry.recordScanBlacklisted (libFile);
+            registry.lastScanActivityTime = now;
+            return true;
         }
 
         // 增量扫描：文件未变化且上次扫描成功时直接复用已知描述。
@@ -681,13 +674,19 @@ struct PluginRegistry::ScanFileResult
         Success,       // 扫描成功，descriptions 有效
         Skipped,       // 增量未变化，消息线程从已知列表复用描述
         Failed,        // 扫描失败，errorMessage 有效
-        Blacklisted    // 因黑名单跳过（未勾选重试）
+        Blacklisted    // 因黑名单跳过（仅 incremental 模式产生）
     };
 
     Type type = Type::Failed;
     juce::String                             filePath;
     juce::String                             errorMessage;
     juce::OwnedArray<juce::PluginDescription> descriptions;
+
+    /** 扫描前该文件是否在黑名单中（成功后据此移除记录）。 */
+    bool wasBlacklisted = false;
+
+    /** 是否来自 retryFailed 模式（失败后需将计数重置为 1）。 */
+    bool retryMode = false;
 };
 
 //==============================================================================
@@ -697,12 +696,12 @@ public:
     ScanWorkerThread (PluginRegistry& owner,
                       const juce::FileSearchPath& paths,
                       bool recursive,
-                      bool forceRescan)
+                      PluginRegistry::ScanMode scanMode)
         : juce::Thread ("PluginScanThread"),
           registry (owner),
           extraPaths (paths),
           recursiveMode (recursive),
-          forceRescanMode (forceRescan) {}
+          mode (scanMode) {}
 
     std::atomic<bool> cancelled { false };
 
@@ -723,8 +722,18 @@ public:
             {
                 const auto lib = vst3scan::VST3Scanner::resolveLibraryFile (f);
 
-                if (lib.existsAsFile())
-                    files.addIfNotAlreadyThere (lib.getFullPathName());
+                if (! lib.existsAsFile())
+                    continue;
+
+                const auto libPath = lib.getFullPathName();
+
+                // retryFailed：只保留黑名单中记录过的文件（含永久跳过与冷静期
+                // 已过的条目），已成功/已存在的插件不进入本次扫描。
+                if (mode == PluginRegistry::ScanMode::retryFailed
+                    && ! PluginBlacklist::getInstance().contains (libPath))
+                    continue;
+
+                files.addIfNotAlreadyThere (libPath);
             }
         }
 
@@ -777,16 +786,28 @@ private:
             return;
         }
 
-        // 黑名单跳过（除非本次为强制全量重扫）。
-        if (! forceRescanMode && PluginBlacklist::getInstance().isBlacklisted (lib.getFullPathName()))
+        const auto& blacklist = PluginBlacklist::getInstance();
+        const auto  libPath   = lib.getFullPathName();
+
+        const bool hasBlacklistEntry = blacklist.contains (libPath);
+        const bool skippedByBlacklist = blacklist.isBlacklisted (libPath);
+        result->wasBlacklisted = hasBlacklistEntry;
+        result->retryMode      = (mode == PluginRegistry::ScanMode::retryFailed);
+
+        // 增量扫描：黑名单（永久跳过或冷静期内）一律跳过；
+        // retryFailed 的文件已在枚举阶段筛出。
+        if (mode == PluginRegistry::ScanMode::incremental && skippedByBlacklist)
         {
             result->type = PluginRegistry::ScanFileResult::Type::Blacklisted;
             done();
             return;
         }
 
-        // 增量跳过：文件未变化且上次成功 → 消息线程从已知列表复用描述。
-        if (! forceRescanMode)
+        // fullRescan 与 retryFailed 都不使用增量缓存，真正重新加载。
+        const bool forceScan = (mode != PluginRegistry::ScanMode::incremental)
+                               || skippedByBlacklist;
+
+        if (! forceScan)
         {
             std::lock_guard<std::mutex> metaLock (registry.metadataMutex);
 
@@ -838,10 +859,10 @@ private:
         done();
     }
 
-    PluginRegistry&     registry;
+    PluginRegistry&      registry;
     juce::FileSearchPath extraPaths;
     bool                 recursiveMode;
-    bool                 forceRescanMode;
+    PluginRegistry::ScanMode mode;
 };
 
 //==============================================================================
@@ -904,7 +925,7 @@ void PluginRegistry::onScanFileProgressed()
 }
 
 //==============================================================================
-void PluginRegistry::startAsyncScan (bool recursive, bool forceRescan)
+void PluginRegistry::startAsyncScan (bool recursive, ScanMode mode)
 {
     if (scanWorker != nullptr && scanWorker->isThreadRunning())
     {
@@ -929,7 +950,7 @@ void PluginRegistry::startAsyncScan (bool recursive, bool forceRescan)
     // 与消息线程在读取 customScanPaths 上产生数据竞争。
     const juce::FileSearchPath pathsToScan = getScanSearchPaths();
 
-    scanWorker = std::make_unique<ScanWorkerThread> (*this, pathsToScan, recursive, forceRescan);
+    scanWorker = std::make_unique<ScanWorkerThread> (*this, pathsToScan, recursive, mode);
     scanWorker->startThread();
     juce::Logger::writeToLog ("Async plugin scan started");
 }
@@ -1011,6 +1032,10 @@ void PluginRegistry::applyScannedFile (const ScanFileResult& result)
             break;
 
         case ScanFileResult::Type::Failed:
+            // retryFailed：先清除旧记录再记失败，使 crashCount 从 1 重新计数。
+            if (result.retryMode)
+                PluginBlacklist::getInstance().clearEntry (result.filePath);
+
             recordScanFailure (file, result.errorMessage);
             {
                 juce::OwnedArray<juce::PluginDescription> none;
@@ -1026,6 +1051,11 @@ void PluginRegistry::applyScannedFile (const ScanFileResult& result)
                 std::lock_guard<std::mutex> metaLock (metadataMutex);
                 updateScanMetadataForFile (file, true, result.descriptions, {});
             }
+
+            // 原黑名单文件本次真正加载成功 → 移除黑名单记录。进程内兜底
+            // 扫描成功时不会经过 scanPluginViaHost，因此统一在此清理。
+            if (result.wasBlacklisted)
+                PluginBlacklist::getInstance().clearEntry (result.filePath);
 
             recordScanSuccess (file, result.descriptions, false);
             commitDescriptionsForFile (result.filePath, result.descriptions);
@@ -1071,41 +1101,6 @@ juce::String PluginRegistry::getScanProgressDetail() const
 {
     juce::ScopedLock plock (progressLock);
     return progressDetail;
-}
-
-//==============================================================================
-void PluginRegistry::setRescanFailedPlugins (bool shouldRescan)
-{
-    rescanFailedPlugins = shouldRescan;
-
-    if (! rescanFailedPlugins)
-        return;
-
-    // JUCE KnownPluginList 自己维护一份黑名单；scanAndAddFile 在调用 CustomScanner
-    // 之前会先检查它。如果不清理，即使勾选了 rescan，插件仍会被 JUCE 直接跳过。
-    if (knownList.getBlacklistedFiles().size() > 0)
-    {
-        juce::Logger::writeToLog ("Clearing JUCE KnownPluginList blacklist for rescan");
-        knownList.clearBlacklistedFiles();
-    }
-
-    // 同时清理本应用自己的 PluginBlacklist.json。
-    if (PluginBlacklist::getInstance().getNumEntries() > 0)
-    {
-        juce::Logger::writeToLog ("Clearing PluginBlacklist.json for rescan");
-        PluginBlacklist::getInstance().clearAll();
-    }
-
-    // 若上次崩溃遗留了未应用的 dead man's pedal，也删除，避免它重新污染黑名单。
-    auto deadMansPedal = AppSettings::getInstance().getDeadMansPedalFile();
-    if (deadMansPedal.existsAsFile())
-    {
-        juce::Logger::writeToLog ("Removing stale dead man's pedal file: " + deadMansPedal.getFullPathName());
-        deadMansPedal.deleteFile();
-    }
-
-    // 立即保存，确保下次启动 / 扫描前黑名单已被清空。
-    saveList();
 }
 
 //==============================================================================
@@ -1336,10 +1331,14 @@ void PluginRegistry::recordScanSuccess (const juce::File& file,
                                         const juce::OwnedArray<juce::PluginDescription>& descriptions,
                                         bool wasSkipped)
 {
+    // 未变化而被跳过的文件只计 Skipped；其复用描述不参与 New / Updated 统计。
     if (wasSkipped)
+    {
         ++lastReport.skippedCount;
-    else
-        ++lastReport.successCount;
+        return;
+    }
+
+    ++lastReport.successCount;
 
     for (const auto* desc : descriptions)
     {
@@ -1500,6 +1499,28 @@ void PluginRegistry::saveCustomScanPaths() const
 std::unique_ptr<juce::PluginDescription> PluginRegistry::findDescriptionForIdentifier (const juce::String& identifier) const
 {
     return knownList.getTypeForIdentifierString (identifier);
+}
+
+//==============================================================================
+bool PluginRegistry::isPluginEnabled (const juce::String& identifier) const
+{
+    if (identifier.isEmpty())
+        return true;
+
+    if (auto* props = AppSettings::getInstance().getPropertiesFile())
+        return props->getBoolValue ("minixer_pluginEnabled_" + identifier, true);
+
+    return true;
+}
+
+//==============================================================================
+void PluginRegistry::setPluginEnabled (const juce::String& identifier, bool enabled)
+{
+    if (identifier.isEmpty())
+        return;
+
+    if (auto* props = AppSettings::getInstance().getPropertiesFile())
+        props->setValue ("minixer_pluginEnabled_" + identifier, enabled);
 }
 
 } // namespace minixer

@@ -72,8 +72,11 @@ public:
     void clearAll();
 
     //==============================================================================
-    /** 判断指定文件是否应被跳过（黑名单且未勾选重试）。 */
+    /** 判断指定文件当前是否应被跳过（永久跳过或处于冷静期）。 */
     bool isBlacklisted (const juce::String& filePath) const;
+
+    /** 判断指定文件是否存在于黑名单中（无论是否处于冷静期）。 */
+    bool contains (const juce::String& filePath) const;
 
     /** 判断指定文件是否允许重新扫描。 */
     bool canRetry (const juce::String& filePath) const;

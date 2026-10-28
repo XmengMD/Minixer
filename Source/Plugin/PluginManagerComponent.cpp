@@ -35,7 +35,7 @@ struct PluginSorter
         {
             case PluginManagerComponent::colName:         cmp = a.name.compare (b.name); break;
             case PluginManagerComponent::colManufacturer: cmp = a.manufacturerName.compare (b.manufacturerName); break;
-            case PluginManagerComponent::colChannels:     cmp = a.numInputChannels - b.numInputChannels; break;
+            case PluginManagerComponent::colCategory:     cmp = a.category.compare (b.category); break;
             default:                                      cmp = a.name.compare (b.name); break;
         }
 
@@ -43,6 +43,63 @@ struct PluginSorter
             cmp = a.name.compare (b.name);
 
         return forwards ? (cmp < 0) : (cmp > 0);
+    }
+};
+
+//==============================================================================
+/** 表头“全部启用 / 全部禁用”三态复选框。
+
+    覆盖在“启用”列表头之上：全部启用画勾、部分启用画横线、全部禁用为空框。
+    位置随列拖动/调整宽度由 PluginManagerComponent::layoutSelectAllToggle() 更新；
+    点击语义为“不是全部启用 → 全部启用，否则 → 全部禁用”。
+*/
+class EnableAllToggle final : public juce::Component,
+                              public juce::SettableTooltipClient
+{
+public:
+    EnableAllToggle()
+    {
+        setTooltip (TRANS ("Enable or disable all plugins"));
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    }
+
+    std::function<bool()> areAllEnabled;
+    std::function<bool()> isAnyEnabled;
+    std::function<void()> onToggle;
+
+    void paint (juce::Graphics& g) override
+    {
+        const auto box = juce::Rectangle<int> (14, 14).withCentre (getLocalBounds().getCentre());
+
+        g.setColour (MixerLookAndFeel::getBackgroundColour());
+        g.fillRect (box);
+
+        g.setColour (MixerLookAndFeel::getBorderColour());
+        g.drawRect (box, 1);
+
+        const bool all = areAllEnabled != nullptr && areAllEnabled();
+        const bool any = all || (isAnyEnabled != nullptr && isAnyEnabled());
+
+        g.setColour (MixerLookAndFeel::getAccentColour());
+
+        if (all)
+        {
+            juce::Path tick;
+            tick.startNewSubPath ((float) box.getX() + 3.0f, (float) box.getCentreY() + 1.0f);
+            tick.lineTo ((float) box.getX() + 6.0f, (float) box.getBottom() - 3.0f);
+            tick.lineTo ((float) box.getRight() - 3.0f, (float) box.getY() + 3.0f);
+            g.strokePath (tick, juce::PathStrokeType (1.6f));
+        }
+        else if (any)
+        {
+            g.fillRect (box.withSizeKeepingCentre (box.getWidth() - 8, 2));
+        }
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (getLocalBounds().contains (e.getPosition()) && onToggle != nullptr)
+            onToggle();
     }
 };
 
@@ -227,15 +284,6 @@ PluginManagerComponent::PluginManagerComponent()
     optionsButton.onClick = [this] { showOptionsMenu(); };
     addAndMakeVisible (optionsButton);
 
-    rescanFailedPluginsButton.setButtonText (TRANS ("Rescan previously failed plugins"));
-    rescanFailedPluginsButton.setTooltip (TRANS ("When checked, plugins that crashed or failed in "
-                                                 "the last scan will be scanned again."));
-    rescanFailedPluginsButton.onClick = [this]
-    {
-        PluginRegistry::getInstance().setRescanFailedPlugins (rescanFailedPluginsButton.getToggleState());
-    };
-    addAndMakeVisible (rescanFailedPluginsButton);
-
     cancelButton.setButtonText (TRANS ("Cancel"));
     cancelButton.onClick = [this] { cancelScan(); };
     cancelButton.setVisible (false);
@@ -244,6 +292,17 @@ PluginManagerComponent::PluginManagerComponent()
     filterLabel.setColour (juce::Label::textColourId, MixerLookAndFeel::getTextColour());
     filterLabel.setText (TRANS ("Filter:"), juce::dontSendNotification);
     addAndMakeVisible (filterLabel);
+
+    // 搜索范围（与插件选择对话框一致）：仅在本次会话内有效，不写入设置。
+    filterCriteriaBox.addItem (TRANS ("Name"),         1);
+    filterCriteriaBox.addItem (TRANS ("Manufacturer"), 2);
+    filterCriteriaBox.addItem (TRANS ("Category"),     3);
+    filterCriteriaBox.addItem (TRANS ("All"),          4);
+    filterCriteriaBox.setSelectedId (1, juce::dontSendNotification);
+    filterCriteriaBox.setTooltip (TRANS ("Choose which fields the filter should match."));
+    filterCriteriaBox.setColour (juce::ComboBox::outlineColourId, MixerLookAndFeel::getBorderColour());
+    filterCriteriaBox.onChange = [this] { refreshList(); };
+    addAndMakeVisible (filterCriteriaBox);
 
     filterEditor.setTextToShowWhenEmpty (TRANS ("Search plugins..."),
                                          MixerLookAndFeel::getTextColour().withAlpha (0.5f));
@@ -259,14 +318,25 @@ PluginManagerComponent::PluginManagerComponent()
     table.getHeader().addColumn (TRANS ("Name"),                PluginManagerComponent::colName,
                                  260, 120, 900, juce::TableHeaderComponent::defaultFlags);
     table.getHeader().addColumn (TRANS ("Manufacturer"),        PluginManagerComponent::colManufacturer,
-                                 160,  80, 600, 0);
-    table.getHeader().addColumn (TRANS ("In/Out"),              PluginManagerComponent::colChannels,
-                                 80,  60, 200, juce::TableHeaderComponent::notResizable);
+                                 160,  80, 600, juce::TableHeaderComponent::defaultFlags);
+    table.getHeader().addColumn (TRANS ("Category"),            PluginManagerComponent::colCategory,
+                                 160,  80, 600, juce::TableHeaderComponent::defaultFlags);
     table.getHeader().setSortColumnId (PluginManagerComponent::colName, true);
 
     table.setModel (this);
     table.setMultipleSelectionEnabled (true);
     addAndMakeVisible (table);
+
+    // 表头“启用”列的三态全选复选框（覆盖在列表头之上）。
+    auto toggle = std::make_unique<EnableAllToggle>();
+    toggle->areAllEnabled = [this] { return areAllPluginsEnabled(); };
+    toggle->isAnyEnabled  = [this] { return isAnyPluginEnabled(); };
+    toggle->onToggle      = [this] { setAllPluginsEnabled (! areAllPluginsEnabled()); };
+    selectAllToggle = std::move (toggle);
+    table.addAndMakeVisible (*selectAllToggle);
+
+    // 列被拖动/改宽后重新对齐表头复选框。
+    table.getHeader().addListener (this);
 
     // —— 状态栏 ——
     scanStatusLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
@@ -285,9 +355,9 @@ PluginManagerComponent::PluginManagerComponent()
 //==============================================================================
 PluginManagerComponent::~PluginManagerComponent()
 {
+    table.getHeader().removeListener (this);
     PluginRegistry::getInstance().getKnownPluginList().removeChangeListener (this);
     stopTimer();
-    PluginRegistry::getInstance().setRescanFailedPlugins (false);
 }
 
 //==============================================================================
@@ -309,11 +379,9 @@ void PluginManagerComponent::resized()
     cancelButton.setBounds (toolbar.removeFromLeft (80));
     toolbar.removeFromLeft (gap);
 
-    auto rescanArea = toolbar.removeFromLeft (juce::jmin (220, toolbar.getWidth() / 2));
-    rescanFailedPluginsButton.setBounds (rescanArea);
-
-    toolbar.removeFromLeft (gap);
     filterLabel.setBounds (toolbar.removeFromLeft (50));
+    toolbar.removeFromLeft (4);
+    filterCriteriaBox.setBounds (toolbar.removeFromLeft (100).reduced (0, 2));
     toolbar.removeFromLeft (4);
     filterEditor.setBounds (toolbar);
 
@@ -323,6 +391,7 @@ void PluginManagerComponent::resized()
     bounds.removeFromBottom (4);
 
     table.setBounds (bounds);
+    layoutSelectAllToggle();
 }
 
 //==============================================================================
@@ -361,10 +430,7 @@ void PluginManagerComponent::paintCell (juce::Graphics& g, int rowNumber, int co
     {
         case PluginManagerComponent::colName:         text = desc.name; break;
         case PluginManagerComponent::colManufacturer: text = desc.manufacturerName; break;
-        case PluginManagerComponent::colChannels:     text = juce::String (desc.numInputChannels)
-                                                            + " -> "
-                                                            + juce::String (desc.numOutputChannels);
-            break;
+        case PluginManagerComponent::colCategory:     text = desc.category; break;
         default: return;
     }
 
@@ -407,7 +473,7 @@ int PluginManagerComponent::getColumnAutoSizeWidth (int columnId)
     switch (columnId)
     {
         case PluginManagerComponent::colEnabled:      return 28;
-        case PluginManagerComponent::colChannels:     return 80;
+        case PluginManagerComponent::colCategory:     return 160;
         case PluginManagerComponent::colManufacturer: return 160;
         case PluginManagerComponent::colName:
         default:
@@ -455,21 +521,36 @@ void PluginManagerComponent::changeListenerCallback (juce::ChangeBroadcaster* so
 //==============================================================================
 void PluginManagerComponent::refreshList()
 {
-    const auto all    = PluginRegistry::getInstance().getKnownPluginList().getTypes();
-    const auto filter = filterEditor.getText().trim().toLowerCase();
+    const auto all   = PluginRegistry::getInstance().getKnownPluginList().getTypes();
+    const auto query = filterEditor.getText().trim();
+    const int  field = filterCriteriaBox.getSelectedId();
+
+    auto matchesFilter = [&query, field] (const juce::PluginDescription& desc)
+    {
+        if (query.isEmpty())
+            return true;
+
+        switch (field)
+        {
+            case 2:  return desc.manufacturerName.containsIgnoreCase (query);
+            case 3:  return desc.category.containsIgnoreCase (query);
+            case 4:  return desc.name.containsIgnoreCase (query)
+                         || desc.manufacturerName.containsIgnoreCase (query)
+                         || desc.category.containsIgnoreCase (query);
+            case 1:
+            default: return desc.name.containsIgnoreCase (query);
+        }
+    };
 
     cachedTypes.clearQuick();
 
     for (const auto& d : all)
-    {
-        if (filter.isNotEmpty() && ! d.name.toLowerCase().contains (filter))
-            continue;
-
-        cachedTypes.add (d);
-    }
+        if (matchesFilter (d))
+            cachedTypes.add (d);
 
     resortCachedTypes();
     table.updateContent();
+    updateSelectAllToggle();
 }
 
 //==============================================================================
@@ -488,18 +569,31 @@ void PluginManagerComponent::showOptionsMenu()
     if (PluginRegistry::getInstance().isScanThreadRunning())
         return;
 
+    enum MenuIds
+    {
+        idEditScanPaths = 1,
+        idScan,
+        idRescanFailed,
+        idFullRescan,
+        idRemoveSelected,
+        idRemoveAll,
+        idApplyPedal,
+        idDontApplyPedal
+    };
+
     juce::PopupMenu menu;
 
-    menu.addItem (1, TRANS ("Edit scan directories..."));
-    menu.addItem (2, TRANS ("Scan"));
-    menu.addItem (3, TRANS ("Fully rescan"));
+    menu.addItem (idEditScanPaths, TRANS ("Edit scan directories..."));
+    menu.addItem (idScan,         TRANS ("Scan"));
+    menu.addItem (idRescanFailed, TRANS ("Rescan failed plug-ins"));
+    menu.addItem (idFullRescan,   TRANS ("Fully rescan"));
     menu.addSeparator();
 
     const bool anySelected = table.getSelectedRows().size() > 0;
     const bool anyRows     = cachedTypes.size() > 0;
 
-    menu.addItem (4, TRANS ("Remove selected plug-ins"), anySelected);
-    menu.addItem (5, TRANS ("Remove all plug-ins"), anyRows);
+    menu.addItem (idRemoveSelected, TRANS ("Remove selected plug-ins"), anySelected);
+    menu.addItem (idRemoveAll,      TRANS ("Remove all plug-ins"), anyRows);
     menu.addSeparator();
 
     bool applyPedal = true;
@@ -507,8 +601,8 @@ void PluginManagerComponent::showOptionsMenu()
     if (auto* props = AppSettings::getInstance().getPropertiesFile())
         applyPedal = props->getBoolValue ("minixer_applyDeadMansPedal", true);
 
-    menu.addItem (6, TRANS ("Apply dead-man's pedal"), true, applyPedal);
-    menu.addItem (7, TRANS ("Don't apply dead-man's pedal"), true, ! applyPedal);
+    menu.addItem (idApplyPedal,    TRANS ("Apply dead-man's pedal"), true, applyPedal);
+    menu.addItem (idDontApplyPedal, TRANS ("Don't apply dead-man's pedal"), true, ! applyPedal);
 
     // 独立应用中 JUCE 关闭了模态循环，须使用异步菜单 API。
     menu.showMenuAsync (juce::PopupMenu::Options(), [this] (int chosen)
@@ -521,13 +615,23 @@ void PluginManagerComponent::showOptionsMenu()
 
         switch (chosen)
         {
-            case 1: showScanPathsEditor();   break;
-            case 2: PluginRegistry::getInstance().startAsyncScan (true, false); break; // 按已管理目录扫描
-            case 3: startFullRescan();       break;
-            case 4: removeSelectedPlugins(); break;
-            case 5: removeAllPlugins();      break;
-            case 6: setPedal (true);  break;
-            case 7: setPedal (false); break;
+            case idEditScanPaths: showScanPathsEditor(); break;
+            case idScan:
+                PluginRegistry::getInstance().startAsyncScan (true,
+                                                              PluginRegistry::ScanMode::incremental);
+                break;
+            case idRescanFailed:
+                PluginRegistry::getInstance().startAsyncScan (true,
+                                                              PluginRegistry::ScanMode::retryFailed);
+                break;
+            case idFullRescan:
+                PluginRegistry::getInstance().startAsyncScan (true,
+                                                              PluginRegistry::ScanMode::fullRescan);
+                break;
+            case idRemoveSelected:  removeSelectedPlugins(); break;
+            case idRemoveAll:       removeAllPlugins();      break;
+            case idApplyPedal:      setPedal (true);         break;
+            case idDontApplyPedal:  setPedal (false);        break;
             default: break;
         }
     });
@@ -554,12 +658,6 @@ void PluginManagerComponent::showScanPathsEditor()
 }
 
 //==============================================================================
-void PluginManagerComponent::startFullRescan()
-{
-    PluginRegistry::getInstance().startAsyncScan (true, true);
-}
-
-//==============================================================================
 void PluginManagerComponent::cancelScan()
 {
     PluginRegistry::getInstance().cancelAsyncScan();
@@ -571,43 +669,108 @@ void PluginManagerComponent::showRowContextMenu (int rowNumber, juce::Point<int>
     if (! juce::isPositiveAndBelow (rowNumber, cachedTypes.size()))
         return;
 
-    const bool enabled = isPluginEnabled (rowNumber);
+    enum MenuIds
+    {
+        idToggleRow = 1,
+        idEnableSelected,
+        idDisableSelected,
+        idEnableManufacturer,
+        idDisableManufacturer,
+        idEnableCategory,
+        idDisableCategory,
+        idEnableFiltered,
+        idDisableFiltered,
+        idRemove,
+        idShowFolder
+    };
+
+    const auto& desc         = cachedTypes.getReference (rowNumber);
+    const bool  enabled      = isPluginEnabled (rowNumber);
+    const auto  manufacturer = desc.manufacturerName.trim();
+    const auto  category     = desc.category.trim();
+
+    const int  numSelected    = table.getSelectedRows().size();
+    const bool batchSelection = numSelected > 1 && table.isRowSelected (rowNumber);
 
     juce::PopupMenu menu;
-    menu.addItem (1, enabled ? TRANS ("Disable") : TRANS ("Enable"));
-    menu.addItem (2, TRANS ("Remove plug-in"));
-    menu.addItem (3, TRANS ("Show folder in file manager"));
+
+    if (batchSelection)
+    {
+        menu.addItem (idEnableSelected,
+                      juce::String (TRANS ("Enable selected")) + " (" + juce::String (numSelected) + ")");
+        menu.addItem (idDisableSelected,
+                      juce::String (TRANS ("Disable selected")) + " (" + juce::String (numSelected) + ")");
+    }
+    else
+    {
+        menu.addItem (idToggleRow, enabled ? TRANS ("Disable") : TRANS ("Enable"));
+    }
+
+    menu.addSeparator();
+
+    juce::PopupMenu manufacturerMenu;
+    manufacturerMenu.addItem (idEnableManufacturer,  TRANS ("Enable all from this manufacturer"),  manufacturer.isNotEmpty());
+    manufacturerMenu.addItem (idDisableManufacturer, TRANS ("Disable all from this manufacturer"), manufacturer.isNotEmpty());
+
+    juce::PopupMenu categoryMenu;
+    categoryMenu.addItem (idEnableCategory,  TRANS ("Enable all from this category"),  category.isNotEmpty());
+    categoryMenu.addItem (idDisableCategory, TRANS ("Disable all from this category"), category.isNotEmpty());
+
+    menu.addSubMenu (TRANS ("By manufacturer"), manufacturerMenu, manufacturer.isNotEmpty());
+    menu.addSubMenu (TRANS ("By category"), categoryMenu, category.isNotEmpty());
+    menu.addSeparator();
+
+    menu.addItem (idEnableFiltered,  TRANS ("Enable all filtered plugins"),  ! cachedTypes.isEmpty());
+    menu.addItem (idDisableFiltered, TRANS ("Disable all filtered plugins"), ! cachedTypes.isEmpty());
+    menu.addSeparator();
+
+    menu.addItem (idRemove, TRANS ("Remove plug-in"));
+    menu.addItem (idShowFolder, TRANS ("Show folder in file manager"));
 
     // 独立应用中 JUCE 关闭了模态循环，须使用异步菜单 API。
+    // 目标区域必须是鼠标处的 1×1 矩形：Rectangle(Point, Point) 是“两角点”
+    // 构造函数，传 (0,0) 会得到一个从屏幕左上角到光标的巨大区域，
+    // 菜单会被摆到屏幕最左侧。
     menu.showMenuAsync (juce::PopupMenu::Options ()
-                            .withMinimumWidth (150)
-                            .withTargetScreenArea (juce::Rectangle<int> (screenPos, juce::Point<int> (0, 0))),
-                        [this, rowNumber, enabled] (int chosen)
+                            .withMinimumWidth (180)
+                            .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
+                        [this, rowNumber, enabled, manufacturer, category] (int chosen)
     {
         if (! juce::isPositiveAndBelow (rowNumber, cachedTypes.size()))
             return;
 
-        if (chosen == 1)
+        switch (chosen)
         {
-            setPluginEnabled (rowNumber, ! enabled);
-        }
-        else if (chosen == 2)
-        {
-            const auto id = cachedTypes.getReference (rowNumber).createIdentifierString();
-            auto& known = PluginRegistry::getInstance().getKnownPluginList();
+            case idToggleRow:
+                setPluginEnabled (rowNumber, ! enabled);
+                break;
+            case idEnableSelected:      setSelectedPluginsEnabled (true);  break;
+            case idDisableSelected:     setSelectedPluginsEnabled (false); break;
+            case idEnableManufacturer:  setPluginsEnabledMatchingField (true,  colManufacturer, manufacturer); break;
+            case idDisableManufacturer: setPluginsEnabledMatchingField (false, colManufacturer, manufacturer); break;
+            case idEnableCategory:      setPluginsEnabledMatchingField (true,  colCategory, category); break;
+            case idDisableCategory:     setPluginsEnabledMatchingField (false, colCategory, category); break;
+            case idEnableFiltered:      setFilteredPluginsEnabled (true);  break;
+            case idDisableFiltered:     setFilteredPluginsEnabled (false); break;
+            case idRemove:
+            {
+                const auto id = cachedTypes.getReference (rowNumber).createIdentifierString();
+                auto& known = PluginRegistry::getInstance().getKnownPluginList();
 
-            for (auto& d : known.getTypes())
-                if (d.createIdentifierString() == id)
-                    known.removeType (d);
+                for (auto& d : known.getTypes())
+                    if (d.createIdentifierString() == id)
+                        known.removeType (d);
 
-            known.sendChangeMessage(); // 触发 refreshList
-            PluginRegistry::getInstance().saveList();
-        }
-        else if (chosen == 3)
-        {
-            juce::File (cachedTypes.getReference (rowNumber).fileOrIdentifier)
-                .getParentDirectory()
-                .startAsProcess();
+                known.sendChangeMessage(); // 触发 refreshList
+                PluginRegistry::getInstance().saveList();
+                break;
+            }
+            case idShowFolder:
+                juce::File (cachedTypes.getReference (rowNumber).fileOrIdentifier)
+                    .getParentDirectory()
+                    .startAsProcess();
+                break;
+            default: break;
         }
     });
 }
@@ -656,13 +819,8 @@ bool PluginManagerComponent::isPluginEnabled (int rowNumber) const
     if (! juce::isPositiveAndBelow (rowNumber, cachedTypes.size()))
         return true;
 
-    auto* props = AppSettings::getInstance().getPropertiesFile();
-
-    if (props == nullptr)
-        return true;
-
-    return props->getBoolValue ("minixer_pluginEnabled_"
-                                + cachedTypes.getReference (rowNumber).createIdentifierString(), true);
+    return PluginRegistry::getInstance().isPluginEnabled (
+        cachedTypes.getReference (rowNumber).createIdentifierString());
 }
 
 //==============================================================================
@@ -671,14 +829,169 @@ void PluginManagerComponent::setPluginEnabled (int rowNumber, bool enabled)
     if (! juce::isPositiveAndBelow (rowNumber, cachedTypes.size()))
         return;
 
-    auto* props = AppSettings::getInstance().getPropertiesFile();
+    PluginRegistry::getInstance().setPluginEnabled (
+        cachedTypes.getReference (rowNumber).createIdentifierString(), enabled);
 
-    if (props == nullptr)
+    syncEnableToggles();
+    table.repaint();
+    updateSelectAllToggle();
+}
+
+//==============================================================================
+void PluginManagerComponent::setPluginsEnabled (const juce::Array<juce::PluginDescription>& descriptions,
+                                                bool enabled)
+{
+    if (descriptions.isEmpty())
         return;
 
-    props->setValue ("minixer_pluginEnabled_"
-                     + cachedTypes.getReference (rowNumber).createIdentifierString(), enabled);
+    auto& registry = PluginRegistry::getInstance();
+
+    for (const auto& desc : descriptions)
+        registry.setPluginEnabled (desc.createIdentifierString(), enabled);
+
+    syncEnableToggles();
     table.repaint();
+    updateSelectAllToggle();
+}
+
+//==============================================================================
+void PluginManagerComponent::setSelectedPluginsEnabled (bool enabled)
+{
+    const auto rows = table.getSelectedRows();
+    juce::Array<juce::PluginDescription> targets;
+
+    for (int i = 0; i < rows.size(); ++i)
+        if (juce::isPositiveAndBelow (rows[i], cachedTypes.size()))
+            targets.add (cachedTypes.getReference (rows[i]));
+
+    setPluginsEnabled (targets, enabled);
+}
+
+//==============================================================================
+void PluginManagerComponent::setAllPluginsEnabled (bool enabled)
+{
+    setPluginsEnabled (PluginRegistry::getInstance().getKnownPluginList().getTypes(), enabled);
+}
+
+//==============================================================================
+void PluginManagerComponent::setFilteredPluginsEnabled (bool enabled)
+{
+    setPluginsEnabled (cachedTypes, enabled);
+}
+
+//==============================================================================
+void PluginManagerComponent::setPluginsEnabledMatchingField (bool enabled, int columnId,
+                                                             const juce::String& value)
+{
+    if (value.isEmpty())
+        return;
+
+    juce::Array<juce::PluginDescription> targets;
+    const auto all = PluginRegistry::getInstance().getKnownPluginList().getTypes();
+
+    for (const auto& desc : all)
+    {
+        const auto& fieldValue = (columnId == colManufacturer) ? desc.manufacturerName
+                                                               : desc.category;
+
+        if (fieldValue.trim().equalsIgnoreCase (value))
+            targets.add (desc);
+    }
+
+    setPluginsEnabled (targets, enabled);
+}
+
+//==============================================================================
+bool PluginManagerComponent::areAllPluginsEnabled() const
+{
+    auto& registry = PluginRegistry::getInstance();
+    const auto types = registry.getKnownPluginList().getTypes();
+
+    if (types.isEmpty())
+        return false;
+
+    for (const auto& desc : types)
+        if (! registry.isPluginEnabled (desc.createIdentifierString()))
+            return false;
+
+    return true;
+}
+
+//==============================================================================
+bool PluginManagerComponent::isAnyPluginEnabled() const
+{
+    auto& registry = PluginRegistry::getInstance();
+
+    for (const auto& desc : registry.getKnownPluginList().getTypes())
+        if (registry.isPluginEnabled (desc.createIdentifierString()))
+            return true;
+
+    return false;
+}
+
+//==============================================================================
+void PluginManagerComponent::layoutSelectAllToggle()
+{
+    if (selectAllToggle == nullptr)
+        return;
+
+    auto& header = table.getHeader();
+    const int index = header.getIndexOfColumnId (PluginManagerComponent::colEnabled, true);
+
+    if (index < 0)
+    {
+        selectAllToggle->setVisible (false);
+        return;
+    }
+
+    const auto columnArea = header.getColumnPosition (index)
+                                  .translated (header.getX(), header.getY());
+
+    const bool usable = columnArea.getWidth() > 0 && columnArea.getHeight() > 0;
+    selectAllToggle->setVisible (usable);
+
+    if (usable)
+    {
+        selectAllToggle->setBounds (columnArea);
+        selectAllToggle->toFront (false);
+    }
+}
+
+//==============================================================================
+void PluginManagerComponent::updateSelectAllToggle()
+{
+    if (selectAllToggle != nullptr)
+        selectAllToggle->repaint();
+}
+
+//==============================================================================
+void PluginManagerComponent::syncEnableToggles()
+{
+    for (int row = 0; row < cachedTypes.size(); ++row)
+    {
+        auto* cell = table.getCellComponent (PluginManagerComponent::colEnabled, row);
+
+        if (auto* toggle = dynamic_cast<juce::ToggleButton*> (cell))
+            toggle->setToggleState (isPluginEnabled (row), juce::dontSendNotification);
+    }
+}
+
+//==============================================================================
+void PluginManagerComponent::tableColumnsChanged (juce::TableHeaderComponent*)
+{
+    layoutSelectAllToggle();
+}
+
+//==============================================================================
+void PluginManagerComponent::tableColumnsResized (juce::TableHeaderComponent*)
+{
+    layoutSelectAllToggle();
+}
+
+//==============================================================================
+void PluginManagerComponent::tableSortOrderChanged (juce::TableHeaderComponent*)
+{
+    // 排序不改变列的横向布局，无需重新定位表头复选框。
 }
 
 //==============================================================================
@@ -715,7 +1028,7 @@ void PluginManagerComponent::timerCallback()
     }
 
     optionsButton.setEnabled             (! scanning);
-    rescanFailedPluginsButton.setEnabled (! scanning);
+    filterCriteriaBox.setEnabled         (! scanning);
     filterEditor.setEnabled              (! scanning);
 
     // 扫描刚结束时，等待短暂时间确保结果已应用，再弹出报告。
@@ -742,12 +1055,12 @@ juce::String PluginManagerComponent::formatScanReport (const PluginScanReport& r
     juce::String text;
     text << TRANS ("Scan completed") << ":\n\n";
     text << TRANS ("Total files scanned") << ": " << report.totalFiles << "\n";
-    text << TRANS ("Successful") << ": " << report.successCount << "\n";
+    text << TRANS ("Successful files") << ": " << report.successCount << "\n";
     text << TRANS ("New plugins") << ": " << report.newCount << "\n";
     text << TRANS ("Updated plugins") << ": " << report.updatedCount << "\n";
-    text << TRANS ("Skipped (unchanged)") << ": " << report.skippedCount << "\n";
-    text << TRANS ("Skipped (blacklisted)") << ": " << report.blacklistedCount << "\n";
-    text << TRANS ("Failed") << ": " << report.failedCount << "\n";
+    text << TRANS ("Skipped (unchanged files)") << ": " << report.skippedCount << "\n";
+    text << TRANS ("Skipped (blacklisted files)") << ": " << report.blacklistedCount << "\n";
+    text << TRANS ("Failed files") << ": " << report.failedCount << "\n";
 
     if (! report.failedEntries.isEmpty())
     {
@@ -773,9 +1086,9 @@ juce::String PluginManagerComponent::formatScanReport (const PluginScanReport& r
 
     if (report.blacklistedCount > 0)
     {
-        text << "\n" << TRANS ("Blacklisted plugins skipped") << ": "
+        text << "\n" << TRANS ("Blacklisted files skipped") << ": "
              << report.blacklistedCount << "\n";
-        text << TRANS ("Check \"Rescan previously failed plugins\" to retry them.") << "\n";
+        text << TRANS ("Choose Options > \"Rescan failed plug-ins\" to retry them.") << "\n";
     }
 
     return text;
@@ -790,7 +1103,6 @@ void PluginManagerComponent::showScanReportIfNeeded()
         return;
 
     PluginRegistry::getInstance().markLastScanReportAsShown();
-    rescanFailedPluginsButton.setToggleState (false, juce::dontSendNotification);
 
     juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
                                             TRANS ("Plugin Scan Report"),

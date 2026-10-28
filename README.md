@@ -79,8 +79,6 @@ CMake 构建脚本会在 PluginHost 编译完成后自动将其复制到 Minixer
 
 确保 `PluginHost64.exe` 与 `PluginHost32.exe` 与 `Minixer.exe` 位于同一目录，然后运行 `Minixer.exe`。
 
-> 如需继续使用 Projucer，保留的 `Minixer.jucer` 仍可打开和导出，但 CMake 是推荐的本地开发方式。
-
 ## 目录结构
 
 ```
@@ -91,12 +89,11 @@ Minixer/
 │   ├── LookAndFeel/        # 自定义外观
 │   ├── Plugin/             # 插件宿主、机架、桥接节点
 │   ├── PluginHost/         # PluginHost 子进程源码
+│   ├── PluginScanner/      # 自主 VST3 扫描器
 │   └── Settings/           # 应用设置与快捷键
-├── JuceLibraryCode/        # Projucer 生成的 JUCE 包含文件
+├── JuceLibraryCode/        # JUCE 统一包含头（JuceHeader.h，CMake 构建使用）
 ├── assets/                 # 图标资源
-├── Builds/                 # 导出的 IDE 工程（编译产物已忽略）
 ├── docs/                   # 设计文档
-├── Minixer.jucer           # JUCE 工程文件（Projucer）
 ├── CMakeLists.txt          # CMake 构建配置
 └── README.md
 ```
@@ -106,13 +103,13 @@ Minixer/
 - 版本号统一在 [CMakeLists.txt](CMakeLists.txt) 顶部一处维护：
   - `MINIXER_VERSION_MAJOR / MINIXER_VERSION_MINOR / MINIXER_VERSION_PATCH` —— 数字版本，派生 `MINIXER_VERSION`（`x.y.z`），用于 Windows PE 文件版本与 `ProjectInfo::versionNumber`。
   - `MINIXER_DISPLAY_VERSION` —— UI / About 展示用版本字符串。
-  - 代码侧（About 窗口、PluginHost 版本）通过编译宏 `MINIXER_DISPLAY_VERSION` / `MINIXER_VERSION_*` 自动取用；若不经 CMake 编译（如 Projucer 导出），[JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) 中保留同值兜底。
+  - 代码侧（About 窗口、PluginHost 版本）通过编译宏 `MINIXER_DISPLAY_VERSION` / `MINIXER_VERSION_*` 自动取用；[JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) 中保留的兜底值仅供非 CMake 编译参考，正常 CMake 构建不会用到。
 - 发布新版本时只需修改 CMakeLists.txt 顶部的版本段，其余自动同步。
 - 发布时请使用 `--config Release` 构建，否则会产生体积巨大的 Debug 二进制并依赖 `MSVCP140D.dll` 等调试运行库。
 - 32 位 PluginHost 需单独创建 Win32 构建目录（如 `build-x86`），不能在同一 x64 构建目录中生成。
 
 - 本项目**不包含 ASIO SDK**，默认使用 WASAPI / DirectSound 音频驱动。如需 ASIO 支持，请自行下载 Steinberg ASIO SDK 并配置项目。
-- 推荐使用 CMake 构建。Projucer 工作流仍可通过 `Minixer.jucer` 使用，但其导出的 Visual Studio 工程可能包含本机绝对路径，换机或上传前需重新配置Minixer.jucer中的JUCE模块包含路径。每当CMakeLists.txt更新时，需同步更新Minixer.jucer中的JUCE模块包含路径。
+- 项目仅使用 CMake 构建。原 Projucer 工程文件（`Minixer.jucer`）因长期未同步、缺少 PluginHost 子进程与 PluginScanner 目标且只声明单一 Minixer 目标，已弃用并删除；如需参考可从 git 历史中找回。
 - 项目仅支持 VST3 插件，不支持 VST2 / AAX。
 - 运行时需要 `PluginHost64.exe` 与 `PluginHost32.exe` 与主程序位于同一目录，用于加载 64-bit / 32-bit 插件的沙盒子进程。
 
@@ -130,7 +127,7 @@ Minixer 的所有用户数据默认存放在 Windows 用户应用数据目录下
 
 | 文件/目录 | 说明 |
 |---|---|
-| `Minixer.settings` | 应用偏好设置（窗口状态、快捷键、搜索范围等） |
+| `Minixer.settings` | 应用偏好设置（窗口状态、快捷键、搜索范围、插件启用状态等） |
 | `Presets/` | 用户保存的预设文件（`.minixer`） |
 | `PluginList.xml` | 扫描到的 VST3 插件列表 |
 | `PluginBlacklist.json` | 扫描/加载时崩溃或超时的插件黑名单 |
@@ -228,8 +225,6 @@ The CMake build script automatically copies PluginHost to the Minixer output dir
 
 Make sure `PluginHost64.exe` and `PluginHost32.exe` are in the same directory as `Minixer.exe`, then run `Minixer.exe`.
 
-> To continue using the Projucer workflow, the retained `Minixer.jucer` can still be opened and exported, but CMake is the recommended local development approach.
-
 ## Directory Structure
 
 ```
@@ -240,12 +235,11 @@ Minixer/
 │   ├── LookAndFeel/        # Custom look-and-feel
 │   ├── Plugin/             # Plugin hosting, rack, and bridge nodes
 │   ├── PluginHost/         # PluginHost child-process source
+│   ├── PluginScanner/      # Standalone VST3 scanner
 │   └── Settings/           # Application settings and shortcuts
-├── JuceLibraryCode/        # Auto-generated JUCE include files
+├── JuceLibraryCode/        # Unified JUCE include header (JuceHeader.h, used by CMake)
 ├── assets/                 # Icon resources
-├── Builds/                 # Exported IDE projects (build artifacts ignored)
 ├── docs/                   # Design documents
-├── Minixer.jucer           # JUCE project file (Projucer)
 ├── CMakeLists.txt          # CMake build configuration
 └── README.md
 ```
@@ -255,13 +249,13 @@ Minixer/
 - The version number is maintained in a single place at the top of [CMakeLists.txt](CMakeLists.txt):
   - `MINIXER_VERSION_MAJOR / MINIXER_VERSION_MINOR / MINIXER_VERSION_PATCH` — numeric version, derives `MINIXER_VERSION` (`x.y.z`) used for the Windows PE file version and `ProjectInfo::versionNumber`.
   - `MINIXER_DISPLAY_VERSION` — display string used by the UI / About window.
-  - The code side (About window, PluginHost version) picks these up automatically via the compile-time macros `MINIXER_DISPLAY_VERSION` / `MINIXER_VERSION_*`; when not building through CMake (e.g. Projucer export), [JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) keeps a matching fallback.
+  - The code side (About window, PluginHost version) picks these up automatically via the compile-time macros `MINIXER_DISPLAY_VERSION` / `MINIXER_VERSION_*`; the fallback values kept in [JuceLibraryCode/JuceHeader.h](JuceLibraryCode/JuceHeader.h) are for non-CMake builds only and are not used by a normal CMake build.
 - To release a new version, only edit the version block at the top of CMakeLists.txt — everything else updates automatically.
 - Always build with `--config Release` for distribution. Debug builds produce much larger binaries and depend on debug runtime DLLs such as `MSVCP140D.dll`.
 - The 32-bit PluginHost requires a separate Win32 build directory (e.g. `build-x86`); it cannot be produced from an x64 build directory.
 
 - This project **does not include the ASIO SDK** and uses WASAPI / DirectSound by default. Add the Steinberg ASIO SDK manually if ASIO support is required.
-- CMake is the recommended build system. The Projucer workflow is still available via `Minixer.jucer`, but may contain machine-specific absolute JUCE module include paths that need to be reconfigured before use on another machine. Whenever CMakeLists.txt is updated, please also update Minixer.jucer accordingly.
+- The project is built with CMake only. The old Projucer project file (`Minixer.jucer`) has been removed because it was not updated for several releases and lacked the PluginHost subprocess and PluginScanner targets (it declared only a single Minixer target); it can still be recovered from git history if needed.
 - Only VST3 plugins are supported; VST2 / AAX are not supported.
 - At runtime, `PluginHost64.exe` and `PluginHost32.exe` must be in the same directory as the main executable, as they are used to sandbox 64-bit and 32-bit plugins.
 
@@ -279,7 +273,7 @@ The directory contains:
 
 | File / Directory | Description |
 |---|---|
-| `Minixer.settings` | Application preferences (window state, shortcuts, search mode, etc.) |
+| `Minixer.settings` | Application preferences (window state, shortcuts, search mode, enabled plugins, etc.) |
 | `Presets/` | User-saved preset files (`.minixer`) |
 | `PluginList.xml` | Scanned VST3 plugin list |
 | `PluginBlacklist.json` | Blacklist of plugins that crashed or timed out during scan/load |

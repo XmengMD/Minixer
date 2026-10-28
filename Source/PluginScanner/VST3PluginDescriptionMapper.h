@@ -57,9 +57,30 @@ inline juce::int32 vst3UniqueIdHash (const CID16& cid) noexcept
 }
 
 //==============================================================================
+/** 类的元数据完整度评分：CID 重复时保留信息更完整的那一条。 */
+inline int pluginClassMetadataScore (const PluginClassRecord& cr) noexcept
+{
+    int score = 0;
+
+    if (cr.nameUnicode.trim().isNotEmpty()
+        && cr.nameUnicode.trim() != cr.name.trim())
+        ++score;
+
+    if (cr.subCategories.trim().isNotEmpty()) ++score;
+    if (cr.vendor.trim().isNotEmpty())        ++score;
+    if (cr.version.trim().isNotEmpty())       ++score;
+
+    return score;
+}
+
+//==============================================================================
 /** 将自主扫描的一个 .vst3 模块记录转换为 PluginDescription 列表。
     仅收录音频效果类（VST3 乐器以 Instrument 子类别注册在 Audio Module Class），
-    与 JUCE 自带扫描的 kVstAudioEffectClass 过滤保持一致。 */
+    与 JUCE 自带扫描的 kVstAudioEffectClass 过滤保持一致。
+
+    CID 去重：外壳插件（WaveShell 等）在 setHostContext 后会把同一批类再次登记，
+    运行时类表中同一个 128 位 CID 会出现在多个索引。索引只是诊断信息，不是身份，
+    因此这里按 CID 合并，避免同一子插件被计数/写入元数据两次。 */
 //==============================================================================
 inline void addDescriptionsFromModule (const PluginModuleRecord& rec,
                                        juce::OwnedArray<juce::PluginDescription>& result)
@@ -68,34 +89,70 @@ inline void addDescriptionsFromModule (const PluginModuleRecord& rec,
     const auto modTime = file.getLastModificationTime();
     const auto now     = juce::Time::getCurrentTime();
 
+    // 先按 CID 选出唯一类记录，并保持首次出现的顺序。
+    std::vector<const PluginClassRecord*> selected;
+    std::map<CID16, size_t>               indexByCid;
+    int                                   duplicateCount = 0;
+
     for (const auto& cr : rec.classes)
     {
         if (cr.category != "Audio Module Class")
             continue;
 
+        // 无效 CID 无法作为唯一键，保持原样逐条输出。
+        if (! cr.cid.isValid())
+        {
+            selected.push_back (&cr);
+            continue;
+        }
+
+        const auto it = indexByCid.find (cr.cid);
+
+        if (it == indexByCid.end())
+        {
+            indexByCid.emplace (cr.cid, selected.size());
+            selected.push_back (&cr);
+        }
+        else
+        {
+            ++duplicateCount;
+
+            if (pluginClassMetadataScore (cr)
+                > pluginClassMetadataScore (*selected[it->second]))
+                selected[it->second] = &cr;
+        }
+    }
+
+    for (const auto* cr : selected)
+    {
         auto desc = std::make_unique<juce::PluginDescription>();
 
         desc->fileOrIdentifier   = rec.filePath;
         desc->lastFileModTime    = modTime;
         desc->lastInfoUpdateTime = now;
-        desc->manufacturerName   = cr.vendor.trim().isNotEmpty() ? cr.vendor.trim()
-                                                                 : rec.factoryVendor.trim();
+        desc->manufacturerName   = cr->vendor.trim().isNotEmpty() ? cr->vendor.trim()
+                                                                  : rec.factoryVendor.trim();
         // name 必须等于 PClassInfo 的 ASCII 名称（加载期 findClassMatchingDescription 按 name 匹配）
-        desc->name               = cr.name.trim();
-        desc->descriptiveName    = cr.displayName();          // 显示名优先 Unicode（PClassInfoW）
+        desc->name               = cr->name.trim();
+        desc->descriptiveName    = cr->displayName();          // 显示名优先 Unicode（PClassInfoW）
         desc->pluginFormatName   = "VST3";
-        desc->numInputChannels   = 0;                          // 加载时按插件实际总线重新配置
-        desc->numOutputChannels  = 0;
-        desc->version            = cr.version.trim();
+        desc->version            = cr->version.trim();
 
-        const auto sub = cr.subCategories.trim();
-        desc->category     = sub.isNotEmpty() ? sub : cr.category;
+        const auto sub = cr->subCategories.trim();
+        desc->category     = sub.isNotEmpty() ? sub : cr->category;
         desc->isInstrument = desc->category.containsIgnoreCase ("Instrument");
 
-        desc->deprecatedUid = vst3DeprecatedUidHash (cr.cid);
-        desc->uniqueId      = vst3UniqueIdHash (cr.cid);
+        desc->deprecatedUid = vst3DeprecatedUidHash (cr->cid);
+        desc->uniqueId      = vst3UniqueIdHash (cr->cid);
 
         result.add (std::move (desc));
+    }
+
+    if (duplicateCount > 0)
+    {
+        juce::Logger::writeToLog ("[VST3Scan] " + file.getFileName()
+                                  + ": ignored " + juce::String (duplicateCount)
+                                  + " duplicate class entries with the same CID");
     }
 }
 

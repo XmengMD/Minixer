@@ -20,6 +20,7 @@ struct PluginLoadOutcome
     std::unique_ptr<PluginBridgeNode> bridge; // 成功时为已初始化节点
     juce::PluginDescription description;     // 完成时更新 slotStates 用
     std::optional<PluginSlotState> stateToRestore;
+    SlotBypassPolicy bypassPolicy = SlotBypassPolicy::existingBehavior;
 };
 
 /** 单个插件槽位的共享加载状态。 */
@@ -320,7 +321,7 @@ MainComponent::MainComponent()
     // 应用启动设置（自动加载预设等）
     applyStartupSettings();
 
-    // 应用 holdToggle 快捷键的默认旁通状态
+    // 应用各槽位快捷键的 default bypass 初始状态（此时预设通常仍在异步加载）
     applyShortcutDefaults();
 
     // 注册 MIDI / HID 快捷键监听器
@@ -506,6 +507,10 @@ void MainComponent::handleGlobalSlotShortcutState (int slotIndex, bool isKeyDown
     if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
         return;
 
+    // 全局旁通期间，槽位自身快捷键无效
+    if (allPluginsBypassed)
+        return;
+
     auto& shortcut = AppSettings::getInstance().getShortcutSettings().getSlotShortcut (slotIndex);
 
     if (shortcut.mode == SlotShortcutMode::cycleToggle)
@@ -567,7 +572,18 @@ bool MainComponent::handleGlobalShortcut (const juce::KeyPress& key)
     // 旁通/恢复所有效果
     if (key == shortcutSettings.getGlobalShortcut (GlobalShortcutAction::toggleAllPluginsBypass))
     {
+        // 全空时全局旁通不生效
+        if (! allPluginsBypassed && ! hasAnyActiveSlot())
+        {
+            statusLabel.setText (TRANS ("No plugins to bypass"), juce::dontSendNotification);
+            return true;
+        }
+
         allPluginsBypassed = ! allPluginsBypassed;
+
+        if (allPluginsBypassed)
+            heldSlotShortcutIndices.clear();
+
         setBypassForAllPlugins (allPluginsBypassed);
         statusLabel.setText (allPluginsBypassed ? TRANS ("All plugins bypassed")
                                                 : TRANS ("All plugins unbypassed"),
@@ -609,6 +625,10 @@ bool MainComponent::handleSlotShortcutPressed (const juce::KeyPress& key)
 //==============================================================================
 bool MainComponent::handleSlotShortcutSourcePressed (const ShortcutInputSource& source)
 {
+    // 全局旁通期间，槽位自身快捷键无效（键盘/HID 共用此入口）
+    if (allPluginsBypassed)
+        return false;
+
     auto& shortcutSettings = AppSettings::getInstance().getShortcutSettings();
     auto matchedIndices = shortcutSettings.findSlotIndicesForInputSource (source);
 
@@ -641,6 +661,13 @@ bool MainComponent::handleSlotShortcutSourcePressed (const ShortcutInputSource& 
                 {
                     juce::Timer::callAfterDelay (200, [this, slotIndex]()
                     {
+                        // 全局旁通期间不恢复默认，避免破坏全局旁通状态
+                        if (allPluginsBypassed)
+                        {
+                            heldSlotShortcutIndices.removeFirstMatchingValue (slotIndex);
+                            return;
+                        }
+
                         auto& shortcut = AppSettings::getInstance().getShortcutSettings().getSlotShortcut (slotIndex);
                         setSlotBypassState (slotIndex, shortcut.defaultBypassed);
                         heldSlotShortcutIndices.removeFirstMatchingValue (slotIndex);
@@ -656,6 +683,10 @@ bool MainComponent::handleSlotShortcutSourcePressed (const ShortcutInputSource& 
 //==============================================================================
 void MainComponent::releaseHeldSlotShortcuts()
 {
+    // 全局旁通期间不恢复各槽位的默认旁通状态
+    if (allPluginsBypassed)
+        return;
+
     auto& shortcutSettings = AppSettings::getInstance().getShortcutSettings();
 
     for (int i = heldSlotShortcutIndices.size() - 1; i >= 0; --i)
@@ -721,10 +752,47 @@ void MainComponent::applySlotBypassDefault (int slotIndex)
     setSlotBypassState (slotIndex, shouldBypass);
 }
 
+//==============================================================================
+void MainComponent::applyShortcutDefaultBypass (int slotIndex, bool updateStatus)
+{
+    if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
+        return;
+
+    if (slotStates[slotIndex].pluginIdentifier.isEmpty())
+        return;
+
+    auto& shortcut = AppSettings::getInstance().getShortcutSettings().getSlotShortcut (slotIndex);
+
+    // 不判断 mode / 是否已分配快捷键：defaultBypassed 作为槽位的初始旁通状态。
+    setSlotBypassState (slotIndex, allPluginsBypassed || shortcut.defaultBypassed, updateStatus);
+}
+
 void MainComponent::applyShortcutDefaults()
 {
     for (int i = 0; i < defaultNumPluginSlots; ++i)
-        applySlotBypassDefault (i);
+        applyShortcutDefaultBypass (i, false);
+}
+
+//==============================================================================
+bool MainComponent::hasAnyActiveSlot() const
+{
+    for (int i = 0; i < defaultNumPluginSlots; ++i)
+    {
+        if (slotStates[i].pluginIdentifier.isNotEmpty())
+            return true;
+
+        // 加载中的槽位视为占用，避免启动/替换加载期间误判为“全空”
+        if (slotBusyState[i] == PluginSlotBusyState::loading)
+            return true;
+    }
+
+    return false;
+}
+
+void MainComponent::resetGlobalBypassIfNoActiveSlots()
+{
+    if (allPluginsBypassed && ! hasAnyActiveSlot())
+        allPluginsBypassed = false;
 }
 
 //==============================================================================
@@ -732,6 +800,10 @@ void MainComponent::midiShortcutMessageReceived (const juce::MidiMessage& messag
 {
     // Note On with velocity 0 实际上是 Note Off，忽略
     if (message.isNoteOn() && message.getVelocity() == 0)
+        return;
+
+    // 全局旁通期间，槽位自身快捷键无效
+    if (allPluginsBypassed)
         return;
 
     for (int i = 0; i < defaultNumPluginSlots; ++i)
@@ -751,6 +823,10 @@ void MainComponent::midiShortcutMessageReceived (const juce::MidiMessage& messag
 
                 juce::Timer::callAfterDelay (200, [this, i]()
                 {
+                    // 全局旁通期间不恢复默认，避免破坏全局旁通状态
+                    if (allPluginsBypassed)
+                        return;
+
                     auto& shortcut = AppSettings::getInstance().getShortcutSettings().getSlotShortcut (i);
                     setSlotBypassState (i, shortcut.defaultBypassed);
                 });
@@ -1149,6 +1225,17 @@ void MainComponent::pluginSlotBypassToggled (int slotIndex, bool shouldBypass)
     if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
         return;
 
+    // 全局旁通状态下点击任意非空槽的 Bypass：解除全局旁通并恢复全部默认旁通，
+    // 忽略本次点击自身的翻转语义。
+    if (allPluginsBypassed && slotStates[slotIndex].pluginIdentifier.isNotEmpty())
+    {
+        allPluginsBypassed = false;
+        setBypassForAllPlugins (false);
+
+        statusLabel.setText (TRANS ("Global bypass cleared"), juce::dontSendNotification);
+        return;
+    }
+
     slotStates[slotIndex].bypassed = shouldBypass;
 
     if (pluginSlotNodes[slotIndex] != nullptr)
@@ -1385,8 +1472,24 @@ void MainComponent::showPluginSelectionMenu (int slotIndex)
         return;
     }
 
+    // 与插件管理器保持一致：插件管理器中未勾选启用的插件不出现在选择列表里。
+    juce::Array<juce::PluginDescription> enabledTypes;
+
+    for (const auto& desc : types)
+        if (PluginRegistry::getInstance().isPluginEnabled (desc.createIdentifierString()))
+            enabledTypes.add (desc);
+
+    if (enabledTypes.isEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
+                                                TRANS ("No Enabled Plugins"),
+                                                TRANS ("All scanned plugins are disabled. "
+                                                        "Enable them in the plugin manager."));
+        return;
+    }
+
     auto* selector = new PluginSelectorComponent (
-        std::move (types),
+        std::move (enabledTypes),
         slotStates[slotIndex].pluginIdentifier,
         [this, slotIndex] (juce::PluginDescription desc)
         {
@@ -1407,7 +1510,8 @@ void MainComponent::showPluginSelectionMenu (int slotIndex)
 
 //==============================================================================
 void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescription& description,
-                                        const std::optional<PluginSlotState>& stateToRestore)
+                                        const std::optional<PluginSlotState>& stateToRestore,
+                                        SlotBypassPolicy bypassPolicy)
 {
     if (audioGraph == nullptr)
         return;
@@ -1431,7 +1535,8 @@ void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescrip
     //
     // 注意：此处不再立即移除槽位已有插件。加载期间槽位进入“加载中”状态
     // （显示提示、屏蔽交互），旧插件继续工作；待新插件在后台就绪后再替换。
-    if (! startSlotLoad (slotIndex, description, arch, sampleRate, bufferSize, stateToRestore))
+    if (! startSlotLoad (slotIndex, description, arch, sampleRate, bufferSize,
+                         stateToRestore, bypassPolicy))
         return;
 
     setSlotBusyState (slotIndex, PluginSlotBusyState::loading, description.name);
@@ -1443,7 +1548,8 @@ void MainComponent::loadPluginIntoSlot (int slotIndex, const juce::PluginDescrip
 //==============================================================================
 bool MainComponent::startSlotLoad (int slotIndex, const juce::PluginDescription& description,
                                    PluginArchitecture arch, double sampleRate, int bufferSize,
-                                   const std::optional<PluginSlotState>& stateToRestore)
+                                   const std::optional<PluginSlotState>& stateToRestore,
+                                   SlotBypassPolicy bypassPolicy)
 {
     if (! juce::isPositiveAndBelow (slotIndex, defaultNumPluginSlots))
         return false;
@@ -1472,12 +1578,13 @@ bool MainComponent::startSlotLoad (int slotIndex, const juce::PluginDescription&
     // 后台线程执行桥接初始化（子进程启动 + 插件加载 + license 校验等耗时操作）。
     // 期间 UI 不做任何同步等待；结果写入共享槽位，由消息线程定时器取回。
     // 显式指定 JobStatus 返回类型，避免与 addJob(std::function<void()>) 重载歧义。
-    auto loadTask = [slot, generation, description, arch, sampleRate, bufferSize, stateToRestore]() -> juce::ThreadPoolJob::JobStatus
+    auto loadTask = [slot, generation, description, arch, sampleRate, bufferSize, stateToRestore, bypassPolicy]() -> juce::ThreadPoolJob::JobStatus
     {
         auto outcome = std::make_unique<PluginLoadOutcome>();
         outcome->generation     = generation;
         outcome->description    = description;
         outcome->stateToRestore = stateToRestore;
+        outcome->bypassPolicy   = bypassPolicy;
 
         auto bridge = std::make_unique<PluginBridgeNode> (description, arch);
         juce::String error;
@@ -1614,6 +1721,8 @@ void MainComponent::cancelSlotLoadsForSlot (int slotIndex)
     // 仅解除“加载中”状态；卸载中由后台销毁完成后自行解除，不能在此提前清掉
     if (slotBusyState[slotIndex] == PluginSlotBusyState::loading)
         setSlotBusyState (slotIndex, PluginSlotBusyState::none);
+
+    resetGlobalBypassIfNoActiveSlots();
 }
 
 //==============================================================================
@@ -1655,6 +1764,7 @@ void MainComponent::processSlotLoadResults()
         {
             // 加载失败：解除加载态，槽位原有插件（若有）保持不变
             setSlotBusyState (slotIndex, PluginSlotBusyState::none);
+            resetGlobalBypassIfNoActiveSlots();
 
             statusLabel.setText (TRANS ("Failed to load bridged plugin: ") + outcome->error,
                                  juce::dontSendNotification);
@@ -1681,6 +1791,7 @@ void MainComponent::processSlotLoadResults()
         {
             // 添加失败：解除加载态，槽位原有插件（若有）保持不变
             setSlotBusyState (slotIndex, PluginSlotBusyState::none);
+            resetGlobalBypassIfNoActiveSlots();
 
             statusLabel.setText (TRANS ("Failed to add plugin to graph"),
                                  juce::dontSendNotification);
@@ -1711,9 +1822,13 @@ void MainComponent::processSlotLoadResults()
             }
         }
 
-        // 先解除加载态，再按“全局旁通 + 槽位快捷键默认值”刷新 bypass（会一并刷新槽位显示）
+        // 先解除加载态，再按加载来源刷新 bypass（会一并刷新槽位显示）
         setSlotBusyState (slotIndex, PluginSlotBusyState::none);
-        applySlotBypassDefault (slotIndex);
+
+        if (outcome->bypassPolicy == SlotBypassPolicy::shortcutDefault)
+            applyShortcutDefaultBypass (slotIndex);
+        else
+            applySlotBypassDefault (slotIndex);
 
         rebuildPluginChain();
 
@@ -1753,6 +1868,9 @@ void MainComponent::removePluginFromSlot (int slotIndex, bool rebuildChain)
 
     if (rebuildChain)
         rebuildPluginChain();
+
+    // 最后一个活动槽位被移除后，全局旁通不再有意义
+    resetGlobalBypassIfNoActiveSlots();
 }
 
 //==============================================================================
@@ -1815,22 +1933,19 @@ void MainComponent::closeAllPluginEditors()
 //==============================================================================
 void MainComponent::setBypassForAllPlugins (bool shouldBypass)
 {
-    auto& shortcutSettings = AppSettings::getInstance().getShortcutSettings();
-
     for (int i = 0; i < defaultNumPluginSlots; ++i)
     {
-        bool bypass = shouldBypass;
-
-        // 关闭全局旁通时，各槽位恢复到快捷键的 defaultBypassed
-        if (! shouldBypass)
+        // 空槽位忽略：不参与全局旁通，也不保留默认旁通状态
+        if (slotStates[i].pluginIdentifier.isEmpty())
         {
-            auto& shortcut = shortcutSettings.getSlotShortcut (i);
-
-            if (shortcut.mode == SlotShortcutMode::holdToggle)
-                bypass = shortcut.defaultBypassed;
+            slotStates[i].bypassed = false;
+            continue;
         }
 
-        setSlotBypassState (i, bypass, false);
+        if (shouldBypass)
+            setSlotBypassState (i, true, false);
+        else
+            applyShortcutDefaultBypass (i, false); // 关闭全局旁通：恢复到 defaultBypassed
     }
 }
 
@@ -1897,7 +2012,8 @@ PluginSlotState MainComponent::getSlotState (int slotIndex) const
 }
 
 //==============================================================================
-void MainComponent::applySlotState (int slotIndex, const PluginSlotState& state)
+void MainComponent::applySlotState (int slotIndex, const PluginSlotState& state,
+                                    SlotBypassPolicy bypassPolicy)
 {
     if (slotIndex < 0 || slotIndex >= defaultNumPluginSlots)
         return;
@@ -1922,8 +2038,11 @@ void MainComponent::applySlotState (int slotIndex, const PluginSlotState& state)
 
         slotStates[slotIndex] = state;
 
-        // 加载后统一按快捷键默认值/全局旁通刷新 bypass
-        applySlotBypassDefault (slotIndex);
+        // 加载后按来源策略刷新 bypass
+        if (bypassPolicy == SlotBypassPolicy::shortcutDefault)
+            applyShortcutDefaultBypass (slotIndex);
+        else
+            applySlotBypassDefault (slotIndex);
         return;
     }
 
@@ -1938,7 +2057,7 @@ void MainComponent::applySlotState (int slotIndex, const PluginSlotState& state)
         return;
     }
 
-    loadPluginIntoSlot (slotIndex, *desc, state);
+    loadPluginIntoSlot (slotIndex, *desc, state, bypassPolicy);
 }
 
 //==============================================================================
@@ -1980,7 +2099,7 @@ void MainComponent::loadSlotStatesFromXml (const juce::XmlElement& parent)
                 PluginSlotState state;
 
                 if (state.fromXml (*child))
-                    applySlotState (index, state);
+                    applySlotState (index, state, SlotBypassPolicy::shortcutDefault);
             }
         }
     }
@@ -2031,7 +2150,7 @@ void MainComponent::savePresetRequested (const juce::File& presetFile)
 {
     auto presetName = presetFile.getFileNameWithoutExtension();
     auto xml = std::make_unique<juce::XmlElement> ("Preset");
-    xml->setAttribute ("version", 2);
+    xml->setAttribute ("version", 3);
     xml->setAttribute ("name", presetName);
 
     saveChannelStripStateToXml (*xml);
@@ -2064,6 +2183,10 @@ void MainComponent::loadPresetRequested (const juce::File& presetFile)
 
     if (xml != nullptr)
     {
+        // 加载预设前先解除全局旁通，确保各槽位按快捷键 default bypass 初始化
+        allPluginsBypassed = false;
+        heldSlotShortcutIndices.clear();
+
         loadChannelStripStateFromXml (*xml);
         loadSlotStatesFromXml (*xml);
 
@@ -2120,9 +2243,14 @@ void MainComponent::preferencesChanged()
 //==============================================================================
 void MainComponent::shortcutsChanged()
 {
-    // 快捷键配置已应用，按 holdToggle 模式的默认旁通状态更新插槽。
     // 先清空可能正处于 hold 状态的索引，避免状态恢复冲突。
     heldSlotShortcutIndices.clear();
+
+    // 全局旁通期间保持全局旁通，仅保存新配置；解除全局旁通时再应用新的默认值。
+    if (allPluginsBypassed)
+        return;
+
+    // 全局旁通关闭时，所有已加载槽位立即应用新的 defaultBypassed。
     applyShortcutDefaults();
 }
 
